@@ -162,6 +162,7 @@ extension SharedStateTests {
       let savedStorage = SavedStoragePreference()
       let savedEnabled = Defaults[.intentsEnabled]
       let history = AppState.shared.history
+      history.storageSettingChanged()
       let decorator = history.added(historyItem("intent gate precedes cleanup"))
       let export = try IntentImageExports.write(Data("image bytes".utf8), for: decorator.item)
       defer {

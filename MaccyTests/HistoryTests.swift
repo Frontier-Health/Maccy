@@ -710,6 +710,7 @@ extension SharedStateTests {
       let export = try IntentImageExports.write(Data("image bytes".utf8), for: item)
       if path == "policy" || path == "clearAll" {
         history.togglePin(decorator)
+        try Storage.shared.save()
       }
       switch path {
       case "delete": history.delete(decorator)

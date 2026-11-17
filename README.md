@@ -72,10 +72,14 @@ brew install maccy
 You can tell Maccy to ignore all copied items:
 
 ```sh
-defaults write org.p0deje.Maccy ignoreEvents true # default is false
+defaults write org.p0deje.Maccy captureMode paused # default is capturing
 ```
 
-This is useful if you have some workflow for copying sensitive data. You can set `ignoreEvents` to true, copy the data and set `ignoreEvents` back to false.
+This is useful if you have some workflow for copying sensitive data. You can set `captureMode` to `paused`, copy the data and set `captureMode` back to `capturing`.
+
+To ignore only the next copy, set `captureMode` to `skipNext`. Maccy switches back to `capturing` after that one copy.
+
+The older `ignoreEvents` and `ignoreOnlyNextEvent` keys are migrated to `captureMode` once, the first time a version with `captureMode` starts, and are ignored after that. Scripts and configuration profiles that write them must switch to `captureMode`.
 
 You can also click the menu icon with <kbd>OPTION (⌥)</kbd> pressed. To ignore only the next copy, click with <kbd>OPTION (⌥)</kbd> + <kbd>SHIFT (⇧)</kbd> pressed.
 

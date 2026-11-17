@@ -171,10 +171,11 @@ class Clipboard {
       AppState.shared.history.interruptPasteStack()
     }
 
-    if Defaults[.ignoreEvents] {
-      if Defaults[.ignoreOnlyNextEvent] {
-        Defaults[.ignoreEvents] = false
-        Defaults[.ignoreOnlyNextEvent] = false
+    let captureMode = Defaults[.captureMode]
+    guard captureMode.capturesCopies else {
+      let nextMode = captureMode.afterCopy
+      if nextMode != captureMode {
+        Defaults[.captureMode] = nextMode
       }
 
       return

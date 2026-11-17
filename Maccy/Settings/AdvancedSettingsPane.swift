@@ -2,9 +2,20 @@ import SwiftUI
 import Defaults
 
 struct AdvancedSettingsPane: View {
+  @Default(.captureMode) private var captureMode
+
+  // On for both `paused` and `skipNext`. Switching it either way sets the whole
+  // mode, which clears any pending one-shot skip.
+  private var turnedOff: Binding<Bool> {
+    Binding(
+      get: { !captureMode.capturesCopies },
+      set: { captureMode = $0 ? .paused : .capturing }
+    )
+  }
+
   var body: some View {
     VStack(alignment: .leading) {
-      Defaults.Toggle(key: .ignoreEvents) {
+      Toggle(isOn: turnedOff) {
         Text("TurnOff", tableName: "AdvancedSettings")
       }
       Text("TurnOffDescription", tableName: "AdvancedSettings")

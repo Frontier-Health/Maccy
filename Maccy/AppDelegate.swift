@@ -30,7 +30,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private var isStatusItemDisabled: Bool {
-    Defaults[.ignoreEvents] || Defaults[.enabledPasteboardTypes].isEmpty
+    !Defaults[.captureMode].capturesCopies || Defaults[.enabledPasteboardTypes].isEmpty
   }
 
   private var statusItemVisibilityObserver: NSKeyValueObservation?
@@ -47,6 +47,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       UserDefaults.standard.removePersistentDomain(forName: Defaults.Keys.testingSuiteName)
     }
     #endif
+
+    // Must run before the clipboard starts watching, so the first copy is
+    // judged by the migrated mode.
+    CaptureMode.migrateLegacyDefaults(in: Defaults.Keys.captureMode.suite)
 
     // Bridge FloatingPanel via AppDelegate.
     AppState.shared.appDelegate = self
@@ -92,7 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     updateStatusItemAccessibilityLabel()
 
     Task {
-      for await _ in Defaults.updates(.ignoreEvents) {
+      for await _ in Defaults.updates(.captureMode) {
         statusItem.button?.appearsDisabled = isStatusItemDisabled
         updateStatusItemAccessibilityLabel()
       }
@@ -189,10 +193,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       .intersection(.deviceIndependentFlagsMask)
 
     if modifierFlags.contains(.option) {
-      Defaults[.ignoreEvents].toggle()
-
+      // Every click sets the whole mode, so a one-shot skip can't linger
+      // behind a later permanent pause.
       if modifierFlags.contains(.shift) {
-        Defaults[.ignoreOnlyNextEvent] = Defaults[.ignoreEvents]
+        Defaults[.captureMode] = Defaults[.captureMode].togglingSkipNext()
+      } else {
+        Defaults[.captureMode] = Defaults[.captureMode].togglingPause()
       }
 
       return

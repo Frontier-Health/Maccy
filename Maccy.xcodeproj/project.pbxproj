@@ -24,7 +24,6 @@
 		2F1A79C02C6DFB7800C98EBD /* SearchVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1A79BF2C6DFB7800C98EBD /* SearchVisibility.swift */; };
 		2F1B61CD301BCFF2000905F9 /* ModifierFlags+Current.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1B61CC301BCFD2000905F9 /* ModifierFlags+Current.swift */; };
 		2F1B61CF301BE55F000905F9 /* EnumeratedForEach.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1B61CE301BE559000905F9 /* EnumeratedForEach.swift */; };
-		2F39CB042AD9A93C00B749FD /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 2F39CB032AD9A93C00B749FD /* Sparkle */; };
 		2F39CB0A2AD9AE1F00B749FD /* Settings in Frameworks */ = {isa = PBXBuildFile; productRef = 2F39CB092AD9AE1F00B749FD /* Settings */; };
 		2F578C3D2EFFE8400088B759 /* ItemsProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F578C3C2EFFE8400088B759 /* ItemsProtocol.swift */; };
 		2F578C3F2EFFE8720088B759 /* SlideoutController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F578C3E2EFFE8720088B759 /* SlideoutController.swift */; };
@@ -53,7 +52,6 @@
 		C0FFEE000000000000000003 /* ShortenedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000004 /* ShortenedTests.swift */; };
 		C5B760C9035C4B3594C47811 /* SizedString.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC13FFCB59043F2883A4437 /* SizedString.swift */; };
 		CA110ED10000000000000001 /* CollectionSurroundingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA110ED10000000000000002 /* CollectionSurroundingTests.swift */; };
-		DA009931256411F90030E697 /* appcast.xml in Resources */ = {isa = PBXBuildFile; fileRef = DA00992C256411F90030E697 /* appcast.xml */; };
 		DA009932256411F90030E697 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = DA00992D256411F90030E697 /* README.md */; };
 		DA009934256411F90030E697 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = DA00992F256411F90030E697 /* LICENSE */; };
 		DA009947256414800030E697 /* SwiftHEXColors in Frameworks */ = {isa = PBXBuildFile; productRef = DA009946256414800030E697 /* SwiftHEXColors */; };
@@ -152,7 +150,6 @@
 		DAA54BFA2C3C951900B7FDD8 /* FloatingPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAA54BF92C3C951900B7FDD8 /* FloatingPanel.swift */; };
 		DAA5ACB22C1B3F8800B58513 /* GeneralSettingsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAA5ACB12C1B3F8800B58513 /* GeneralSettingsPane.swift */; };
 		DAA5ACB52C1B803000B58513 /* GeneralSettings.strings in Resources */ = {isa = PBXBuildFile; fileRef = DAA5ACB32C1B803000B58513 /* GeneralSettings.strings */; };
-		DAA5ACCA2C1BEE8A00B58513 /* SoftwareUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAA5ACC92C1BEE8A00B58513 /* SoftwareUpdater.swift */; };
 		DAAEB196219694AE00A7883C /* About.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAEB195219694AE00A7883C /* About.swift */; };
 		DAB082962A2B7B850053E463 /* AppStoreReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAB082952A2B7B850053E463 /* AppStoreReview.swift */; };
 		DABDE97F2974706C005B32E9 /* KeyboardLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = DABDE97E2974706C005B32E9 /* KeyboardLayout.swift */; };
@@ -170,6 +167,8 @@
 		F18F166970893C503065D056 /* View+ButtonAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB2945CD7912BE7C7D330C27 /* View+ButtonAction.swift */; };
 		FFFC00000000000000000001 /* String+UnsafeForTitleLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFC00000000000000000002 /* String+UnsafeForTitleLayout.swift */; };
 		FFFC00000000000000000003 /* UnsafeForTitleLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFC00000000000000000004 /* UnsafeForTitleLayoutTests.swift */; };
+		A90000000000000000000002 /* DistributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90000000000000000000001 /* DistributionTests.swift */; };
+		A90000000000000000000004 /* AppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90000000000000000000003 /* AppIdentity.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -275,7 +274,6 @@
 		C2BC0DBD627544668E9BE9C1 /* pt */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = pt; path = pt.lproj/StorageSettings.strings; sourceTree = "<group>"; };
 		CA110ED10000000000000002 /* CollectionSurroundingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionSurroundingTests.swift; sourceTree = "<group>"; };
 		CF8FD822BE40469D80B10A06 /* pt */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = pt; path = pt.lproj/AdvancedSettings.strings; sourceTree = "<group>"; };
-		DA00992C256411F90030E697 /* appcast.xml */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xml; path = appcast.xml; sourceTree = "<group>"; };
 		DA00992D256411F90030E697 /* README.md */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		DA00992F256411F90030E697 /* LICENSE */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
 		DA05B5102C234CB1006980FE /* MaccyApp.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MaccyApp.swift; sourceTree = "<group>"; };
@@ -568,7 +566,6 @@
 		DAA5ACC62C1BA35C00B58513 /* th */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = th; path = th.lproj/GeneralSettings.strings; sourceTree = "<group>"; };
 		DAA5ACC72C1BA35D00B58513 /* tr */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = tr; path = tr.lproj/GeneralSettings.strings; sourceTree = "<group>"; };
 		DAA5ACC82C1BA35E00B58513 /* uk */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = uk; path = uk.lproj/GeneralSettings.strings; sourceTree = "<group>"; };
-		DAA5ACC92C1BEE8A00B58513 /* SoftwareUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftwareUpdater.swift; sourceTree = "<group>"; };
 		DAAEB195219694AE00A7883C /* About.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = About.swift; sourceTree = "<group>"; };
 		DAB082952A2B7B850053E463 /* AppStoreReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreReview.swift; sourceTree = "<group>"; };
 		DAB6265F2CAD7E4F001B720E /* hu */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = hu; path = hu.lproj/PinsSettings.strings; sourceTree = "<group>"; };
@@ -620,6 +617,9 @@
 		F2E5FA9061DA4866BCFAFE90 /* km */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = km; path = km.lproj/AppearanceSettings.strings; sourceTree = "<group>"; };
 		FFFC00000000000000000002 /* String+UnsafeForTitleLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "String+UnsafeForTitleLayout.swift"; sourceTree = "<group>"; };
 		FFFC00000000000000000004 /* UnsafeForTitleLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnsafeForTitleLayoutTests.swift; sourceTree = "<group>"; };
+		A90000000000000000000001 /* DistributionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DistributionTests.swift; sourceTree = "<group>"; };
+		A90000000000000000000003 /* AppIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIdentity.swift; sourceTree = "<group>"; };
+		A90000000000000000000005 /* Organisation.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Organisation.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -641,7 +641,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				2F39CB042AD9A93C00B749FD /* Sparkle in Frameworks */,
 				DA009955256414E60030E697 /* KeyboardShortcuts in Frameworks */,
 				DAC0CA3E2C88E7A4003BF498 /* Fuse in Frameworks */,
 				DA5F46512020E9FB00425C11 /* Carbon.framework in Frameworks */,
@@ -806,6 +805,7 @@
 				DA696BD12401EEE900DE80CF /* SorterTests.swift */,
 				DA360DB41E3DF137005C6F6B /* Info.plist */,
 				4CB7148030897A9E00A357EC /* SharedStateTests.swift */,
+				A90000000000000000000001 /* DistributionTests.swift */,
 			);
 			path = MaccyTests;
 			sourceTree = "<group>";
@@ -866,9 +866,9 @@
 				DA360DB11E3DF137005C6F6B /* MaccyTests */,
 				DA0EE7B7204657830025FC60 /* MaccyUITests */,
 				DACCD5822C93605C00BAD74C /* Maccy.xctestplan */,
-				DA00992C256411F90030E697 /* appcast.xml */,
 				DA00992F256411F90030E697 /* LICENSE */,
 				DA00992D256411F90030E697 /* README.md */,
+				A90000000000000000000005 /* Organisation.xcconfig */,
 				DAEE38441E3DBEB100DD2966 /* Products */,
 				C2D16D1C2EE365D52E1EE446 /* Frameworks */,
 			);
@@ -900,6 +900,7 @@
 				DA6373971E4AB9BB00263391 /* Assets.xcassets */,
 				DAEE384D1E3DBEB100DD2966 /* Info.plist */,
 				DAAEB195219694AE00A7883C /* About.swift */,
+				A90000000000000000000003 /* AppIdentity.swift */,
 				DA6D98E12AEABE03008A77CE /* Accessibility.swift */,
 				DAEE38461E3DBEB100DD2966 /* AppDelegate.swift */,
 				2FB5BC9F2CD8F73C008B33F4 /* ApplicationImage.swift */,
@@ -927,7 +928,6 @@
 				DAC14123232367B200FCFA30 /* Search.swift */,
 				2F1A79BF2C6DFB7800C98EBD /* SearchVisibility.swift */,
 				2F0EC77C2E773314003E2EA9 /* Selection.swift */,
-				DAA5ACC92C1BEE8A00B58513 /* SoftwareUpdater.swift */,
 				DA696BCD240177E800DE80CF /* Sorter.swift */,
 				DA243D132C2F66DD0012A27F /* Storage.swift */,
 				DA81D673252A056B009977BC /* Throttler.swift */,
@@ -979,6 +979,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = DAEE38501E3DBEB100DD2966 /* Build configuration list for PBXNativeTarget "Maccy" */;
 			buildPhases = (
+				A90000000000000000000006 /* Check release identity */,
 				DAEE383F1E3DBEB100DD2966 /* Sources */,
 				DAEE38401E3DBEB100DD2966 /* Frameworks */,
 				DAEE38411E3DBEB100DD2966 /* Resources */,
@@ -993,7 +994,6 @@
 				DA5154D72564102900C01004 /* Sauce */,
 				DA009946256414800030E697 /* SwiftHEXColors */,
 				DA009954256414E60030E697 /* KeyboardShortcuts */,
-				2F39CB032AD9A93C00B749FD /* Sparkle */,
 				2F39CB092AD9AE1F00B749FD /* Settings */,
 				DA13D7C92C19F52B00FA9E23 /* LaunchAtLogin */,
 				DA13D7CF2C19F8C300FA9E23 /* Defaults */,
@@ -1013,18 +1013,16 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastSwiftUpdateCheck = 0920;
 				LastUpgradeCheck = 1520;
-				ORGANIZATIONNAME = p0deje;
+				ORGANIZATIONNAME = "Frontier Health";
 				TargetAttributes = {
 					DA0EE7B5204657830025FC60 = {
 						CreatedOnToolsVersion = 9.2;
-						DevelopmentTeam = MN3X4648SC;
 						LastSwiftMigration = 1020;
 						ProvisioningStyle = Automatic;
 						TestTargetID = DAEE38421E3DBEB100DD2966;
 					};
 					DA360DAF1E3DF137005C6F6B = {
 						CreatedOnToolsVersion = 8.2.1;
-						DevelopmentTeam = MN3X4648SC;
 						LastSwiftMigration = 1020;
 						ProvisioningStyle = Automatic;
 						TestTargetID = DAEE38421E3DBEB100DD2966;
@@ -1079,7 +1077,6 @@
 				DA5154D62564102900C01004 /* XCRemoteSwiftPackageReference "Sauce" */,
 				DA009945256414800030E697 /* XCRemoteSwiftPackageReference "SwiftHEXColors" */,
 				DA009953256414E60030E697 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
-				2F39CB022AD9A93C00B749FD /* XCRemoteSwiftPackageReference "Sparkle" */,
 				2F39CB082AD9AE1F00B749FD /* XCRemoteSwiftPackageReference "Settings" */,
 				DA13D7C82C19F43E00FA9E23 /* XCRemoteSwiftPackageReference "LaunchAtLogin-Modern" */,
 				DA13D7CE2C19F8C300FA9E23 /* XCRemoteSwiftPackageReference "Defaults" */,
@@ -1124,7 +1121,6 @@
 				4762D6972467226100B3A2BA /* Localizable.strings in Resources */,
 				DA009934256411F90030E697 /* LICENSE in Resources */,
 				DA20FA742B082E0100056DD5 /* Knock.caf in Resources */,
-				DA009931256411F90030E697 /* appcast.xml in Resources */,
 				DAA5ACB52C1B803000B58513 /* GeneralSettings.strings in Resources */,
 				DA740D7A2C21E6B0007B1A36 /* AdvancedSettings.strings in Resources */,
 				DA689FB02C1CD3B00009B887 /* StorageSettings.strings in Resources */,
@@ -1136,6 +1132,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A90000000000000000000006 /* Check release identity */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ("$(SRCROOT)/scripts/check-release-identity.sh");
+			name = "Check release identity";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"${SRCROOT}/scripts/check-release-identity.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		DA0EE7B2204657830025FC60 /* Sources */ = {
@@ -1154,6 +1165,7 @@
 				DA3CE8001E44A62500B3AA98 /* ClipboardTests.swift in Sources */,
 				A3CA9E1E2EF0000100C0FFEE /* StoragePolicyTests.swift in Sources */,
 				4CB7148130897A9E00A357EC /* SharedStateTests.swift in Sources */,
+				A90000000000000000000002 /* DistributionTests.swift in Sources */,
 				DA1EDE432045B35300479723 /* HistoryDecoratorTests.swift in Sources */,
 				DAE2850223225BD90080E394 /* ColorImageTests.swift in Sources */,
 				DA384E86232746D800603999 /* SearchTests.swift in Sources */,
@@ -1215,7 +1227,6 @@
 				DAA365E72C4C57E600A394F8 /* KeyEquivalent+Keys.swift in Sources */,
 				DA9C3C652C211B5F0056795D /* AdvancedSettingsPane.swift in Sources */,
 				2FA81FE02E43D9B700C12F92 /* Dictionary+RemoveItem.swift in Sources */,
-				DAA5ACCA2C1BEE8A00B58513 /* SoftwareUpdater.swift in Sources */,
 				2F9B42F12F1A499D006548E5 /* ToolbarView.swift in Sources */,
 				DAA5ACB22C1B3F8800B58513 /* GeneralSettingsPane.swift in Sources */,
 				DA1969122C3F0DD200258481 /* HistoryItemView.swift in Sources */,
@@ -1227,6 +1238,7 @@
 				DA689FCC2C1D1D510009B887 /* MenuIcon.swift in Sources */,
 				2FD499452FFC489400149F02 /* MovableByWindowBackgroundModifier.swift in Sources */,
 				DAAEB196219694AE00A7883C /* About.swift in Sources */,
+				A90000000000000000000004 /* AppIdentity.swift in Sources */,
 				DA6D98E22AEABE03008A77CE /* Accessibility.swift in Sources */,
 				2F0EC7792E7727E3003E2EA9 /* HeightReaderModifier.swift in Sources */,
 				2F578C3D2EFFE8400088B759 /* ItemsProtocol.swift in Sources */,
@@ -1645,7 +1657,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				INFOPLIST_FILE = MaccyUITests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1654,7 +1665,7 @@
 					"@loader_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.p0deje.MaccyUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(ORG_BUNDLE_ID).UITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
@@ -1673,7 +1684,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				INFOPLIST_FILE = MaccyUITests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1682,7 +1692,7 @@
 					"@loader_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.p0deje.MaccyUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(ORG_BUNDLE_ID).UITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
@@ -1699,7 +1709,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
 				INFOPLIST_FILE = MaccyTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1707,7 +1716,7 @@
 					"@loader_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.p0deje.MaccyTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(ORG_BUNDLE_ID).Tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
@@ -1724,7 +1733,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
 				INFOPLIST_FILE = MaccyTests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1732,7 +1740,7 @@
 					"@loader_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.p0deje.MaccyTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(ORG_BUNDLE_ID).Tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
@@ -1743,6 +1751,7 @@
 		};
 		DAEE384E1E3DBEB100DD2966 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A90000000000000000000005 /* Organisation.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -1809,6 +1818,7 @@
 		};
 		DAEE384F1E3DBEB100DD2966 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A90000000000000000000005 /* Organisation.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -1879,7 +1889,6 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 63;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
 				ENABLE_HARDENED_RUNTIME = YES;
 				EXCLUDED_SOURCE_FILE_NAMES = AppIcon.icon;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -1894,7 +1903,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 2.8.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.p0deje.Maccy;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(ORG_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -1915,7 +1924,6 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 63;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
 				ENABLE_HARDENED_RUNTIME = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1929,7 +1937,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 2.8.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.p0deje.Maccy;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(ORG_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_VERSION = 6.0;
@@ -1984,14 +1992,6 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 1.15.1;
-			};
-		};
-		2F39CB022AD9A93C00B749FD /* XCRemoteSwiftPackageReference "Sparkle" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/sparkle-project/Sparkle";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.10.0;
 			};
 		};
 		2F39CB082AD9AE1F00B749FD /* XCRemoteSwiftPackageReference "Settings" */ = {
@@ -2057,11 +2057,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 2F12271C2E5C932200A1592A /* XCRemoteSwiftPackageReference "swift-log" */;
 			productName = Logging;
-		};
-		2F39CB032AD9A93C00B749FD /* Sparkle */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 2F39CB022AD9A93C00B749FD /* XCRemoteSwiftPackageReference "Sparkle" */;
-			productName = Sparkle;
 		};
 		2F39CB092AD9AE1F00B749FD /* Settings */ = {
 			isa = XCSwiftPackageProductDependency;

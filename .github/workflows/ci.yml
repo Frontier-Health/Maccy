@@ -33,6 +33,9 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Test the release identity guard
+        run: sh scripts/test-check-release-identity.sh
+
       - name: Resolve Swift packages
         run: |
           xcodebuild -resolvePackageDependencies \

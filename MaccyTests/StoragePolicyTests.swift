@@ -230,7 +230,7 @@ struct StoragePolicyTests {
 
   @Test("A preference forced by a configuration profile wins over the user's value")
   func forcedPreference() throws {
-    let suiteName = "org.p0deje.Maccy.tests.storagePolicy.\(UUID().uuidString)"
+    let suiteName = "\(AppIdentity.bundleIdentifier).tests.storagePolicy.\(UUID().uuidString)"
     let defaults = try #require(ManagedDefaults(
       suiteName: suiteName,
       forced: [StoragePolicy.preferenceKey: ["public.utf8-plain-text"]]
@@ -245,7 +245,7 @@ struct StoragePolicyTests {
 
   @Test("An invalid forced preference stores nothing")
   func forcedInvalidPreference() throws {
-    let suiteName = "org.p0deje.Maccy.tests.storagePolicy.\(UUID().uuidString)"
+    let suiteName = "\(AppIdentity.bundleIdentifier).tests.storagePolicy.\(UUID().uuidString)"
     let defaults = try #require(ManagedDefaults(
       suiteName: suiteName,
       forced: [StoragePolicy.preferenceKey: "public.utf8-plain-text"]
@@ -259,7 +259,7 @@ struct StoragePolicyTests {
   }
 
   private static func makeDefaults() throws -> UserDefaults {
-    let suiteName = "org.p0deje.Maccy.tests.storagePolicy.\(UUID().uuidString)"
+    let suiteName = "\(AppIdentity.bundleIdentifier).tests.storagePolicy.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suiteName))
     defaults.removePersistentDomain(forName: suiteName)
     return defaults

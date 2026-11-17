@@ -188,7 +188,7 @@ extension SharedStateTests {
     func copyWhilePausedIsNotCapturedAfterQuickExternalResume() throws {
       #expect(checkNow().isEmpty)
 
-      // What `defaults write org.p0deje.Maccy captureMode …` does.
+      // What `defaults write <BUNDLE_ID> captureMode …` does.
       preferences.set(CaptureMode.paused.rawValue, forKey: CaptureMode.defaultsKey)
       copyString("secret")
       preferences.set(CaptureMode.capturing.rawValue, forKey: CaptureMode.defaultsKey)
@@ -1013,7 +1013,7 @@ struct CaptureModeTests {
   @Test("Each case name reads back as itself", arguments: CaptureMode.allCases)
   func readsCaseNames(mode: CaptureMode) throws {
     let defaults = try Self.makeDefaults()
-    // What `defaults write org.p0deje.Maccy captureMode <mode>` stores.
+    // What `defaults write <BUNDLE_ID> captureMode <mode>` stores.
     defaults.set(mode.rawValue, forKey: CaptureMode.defaultsKey)
     #expect(CaptureMode.stored(in: defaults) == mode)
     #expect(CaptureMode.effective(in: defaults) == mode)
@@ -1343,7 +1343,7 @@ struct CaptureModeTests {
   @Test("Migrates string values written by a plain defaults write")
   func migratesStringValues() throws {
     let defaults = try Self.makeDefaults()
-    // `defaults write org.p0deje.Maccy ignoreEvents true` stores the string "true".
+    // `defaults write <BUNDLE_ID> ignoreEvents true` stores the string "true".
     defaults.set("true", forKey: CaptureMode.legacyIgnoreEventsKey)
 
     #expect(CaptureMode.migrateLegacyDefaults(in: defaults) == .paused)
@@ -1404,7 +1404,7 @@ struct CaptureModeTests {
 
   // A throwaway preferences domain.
   private static func makeDefaults() throws -> UserDefaults {
-    let suiteName = "org.p0deje.Maccy.tests.captureMode.\(UUID().uuidString)"
+    let suiteName = "\(AppIdentity.bundleIdentifier).tests.captureMode.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suiteName))
     defaults.removePersistentDomain(forName: suiteName)
     return defaults
@@ -1417,7 +1417,7 @@ struct CaptureModeTests {
   }
 
   private static func makeManagedDefaults(_ forced: [String: Any]) throws -> UserDefaults {
-    let suiteName = "org.p0deje.Maccy.tests.captureMode.\(UUID().uuidString)"
+    let suiteName = "\(AppIdentity.bundleIdentifier).tests.captureMode.\(UUID().uuidString)"
     let defaults = try #require(ManagedDefaults(suiteName: suiteName, forced: forced))
     defaults.removePersistentDomain(forName: suiteName)
     return defaults
@@ -1534,7 +1534,7 @@ struct ClipboardHTMLTextTests {
     #expect(IgnoreRules.rtfTextDataSize(picture) < 100)
     let item = NSPasteboardItem()
     item.setData(Data(repeating: 97, count: IgnoreRules.rawRTFDataLimit + 1), forType: .rtf)
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(["unmatched"], forKey: Defaults.Keys.ignoreRegexp.name)
@@ -1545,7 +1545,7 @@ struct ClipboardHTMLTextTests {
 
   @Test("Reset re-reads a repaired value and addition refuses at exactly 128 rules")
   func resetRepairedRules() throws {
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let key = Defaults.Keys.ignoreRegexp.name
@@ -1562,7 +1562,7 @@ struct ClipboardHTMLTextTests {
 
   @Test("Rich duplicates select the longest original; plain wins over rich whitespace differences")
   func originalDeduplication() throws {
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let key = Defaults.Keys.ignoreRegexp.name
@@ -1581,7 +1581,7 @@ struct ClipboardHTMLTextTests {
 
   @Test("Settings distinguish unreadable, too many and invalid rules; reset and add honor ownership")
   func configurationStates() throws {
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let key = Defaults.Keys.ignoreRegexp.name
@@ -1608,7 +1608,7 @@ struct ClipboardHTMLTextTests {
 
   @Test("Text is counted once across plain, HTML and RTF, with trailing whitespace normalized")
   func deduplicatedText() throws {
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(["secret"], forKey: Defaults.Keys.ignoreRegexp.name)
@@ -1624,7 +1624,7 @@ struct ClipboardHTMLTextTests {
 
   @Test("Plain matches precede RTF import; derived matches and RTF caps fail closed")
   func rtfCostBoundary() throws {
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(["secret"], forKey: Defaults.Keys.ignoreRegexp.name)
@@ -1648,7 +1648,7 @@ struct ClipboardHTMLTextTests {
   @Test("Managed lists refuse replacement, addition and deletion without shadow writes")
   func managedRules() throws {
     let key = Defaults.Keys.ignoreRegexp.name
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(ManagedDefaults(suiteName: suite, forced: [key: ["["]]))
     #expect(IgnoreRules.isManaged(in: defaults))
     #expect(!IgnoreRules.save("valid", replacingAt: 0, in: defaults))
@@ -1664,7 +1664,7 @@ struct ClipboardHTMLTextTests {
 
   @Test("Data preflight precedes decoding; rejection categories contain no copied text")
   func rejectionReasons() throws {
-    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let suite = "\(AppIdentity.bundleIdentifier).tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(["secret"], forKey: Defaults.Keys.ignoreRegexp.name)

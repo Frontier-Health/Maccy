@@ -1,9 +1,9 @@
 "Title" = "Lanjutan";
 "TurnOff" = "Matikan";
 "TurnOffDescription" = "Abaikan sementara semua salinan baru.\nAnda mungkin ingin menggunakan ini dan menonaktifkan aplikasi saat menyalin data sensitif.";
-"TurnOffShellScript" = "defaults write org.p0deje.Maccy captureMode paused\n# salin data\ndefaults write org.p0deje.Maccy captureMode capturing";
+"TurnOffShellScript" = "defaults write <BUNDLE_ID> captureMode paused\n# salin data\ndefaults write <BUNDLE_ID> captureMode capturing";
 "TurnOffViaMenuIconDescription" = "Anda juga dapat mengeklik ikon menu sambil menekan ⌥.\nUntuk mengabaikan hanya salinan berikutnya, klik dengan menekan ⌥⇧.";
-"TurnOffNextShellScript" = "defaults write org.p0deje.Maccy captureMode skipNext\n# salin data";
+"TurnOffNextShellScript" = "defaults write <BUNDLE_ID> captureMode skipNext\n# salin data";
 "ClearHistoryOnQuit" = "Hapus riwayat saat keluar";
 "ClearHistoryOnQuitTooltip" = "Hapus otomatis semua item yang tidak disematkan sebelum keluar dari aplikasi.";
 "ClearSystemClipboard" = "Juga hapus papan klip sistem";

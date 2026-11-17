@@ -3,7 +3,7 @@ import AppKit
 // Whether Maccy records new copies.
 //
 // Stored as a string under the `captureMode` defaults key, so it can be set from
-// a script, e.g. `defaults write org.p0deje.Maccy captureMode paused`.
+// a script, e.g. `defaults write <BUNDLE_ID> captureMode paused`.
 //
 // Everything that needs to know whether Maccy is capturing (the clipboard
 // watcher, the menu bar icon and its accessibility label, the Option-click

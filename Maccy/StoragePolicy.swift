@@ -109,7 +109,7 @@ nonisolated struct StoragePolicy: Sendable, Equatable {
 
   // Metadata Maccy needs to work. None of them is stored with the bytes the
   // copying app supplied (see `StorageAllowList.admission(of:value:)`):
-  // - `org.p0deje.Maccy` marks a copy Maccy made from its own history, so the
+  // - The runtime app bundle ID marks a copy Maccy made from its own history, so the
   //   duplicate keeps its original application. Stored empty.
   // - `com.apple.is-remote-clipboard` marks a Universal Clipboard copy, which
   //   changes how file URLs and images are read. Stored empty.

@@ -1,12 +1,10 @@
 > [!WARNING]
-> **Beware of fake websites impersonating Maccy.** Malicious sites (such as `maccyapp.net` and `maccyapp.com`) distribute malware disguised as Maccy. [**maccy.app**](https://maccy.app) is the **only** official website.
+> This is Frontier Health’s MDM-only fork of [Maccy](https://github.com/p0deje/Maccy). Obtain staff packages through your organisation’s MDM. See [build identity](docs/build-identity.md) before packaging.
 
 <img width="128px" src="https://maccy.app/img/maccy/Logo.png" alt="Logo" />
 
-# [Maccy](https://maccy.app)
+# [Maccy](https://github.com/Frontier-Health/Maccy)
 
-[![Downloads](https://img.shields.io/github/downloads/p0deje/Maccy/total.svg)](https://github.com/p0deje/Maccy/releases/latest)
-[![Build Status](https://img.shields.io/bitrise/716921b669780314/master?token=3pMiCb5dpFzlO-7jTYtO3Q)](https://app.bitrise.io/app/716921b669780314)
 
 Maccy is a lightweight clipboard manager for macOS. It keeps the history of what you copy
 and lets you quickly navigate, search, and use previous clipboard contents.
@@ -44,11 +42,8 @@ Maccy works on macOS Sonoma 14 or higher.
 
 ## Install
 
-Download the latest version from the [releases](https://github.com/p0deje/Maccy/releases/latest) page, or use [Homebrew](https://brew.sh/):
-
-```sh
-brew install maccy
-```
+This fork is distributed to staff Macs only through MDM as a signed, notarized package.
+Updates are delivered by MDM; the app has no self-updater.
 
 ## Usage
 
@@ -72,7 +67,7 @@ brew install maccy
 You can tell Maccy to ignore all copied items:
 
 ```sh
-defaults write org.p0deje.Maccy captureMode paused # default is capturing
+defaults write <ORG_BUNDLE_ID> captureMode paused # default is capturing
 ```
 
 A script can set `captureMode` to `paused`, copy the data and set `captureMode` back to `capturing`. Treat this as best-effort, not as a guarantee: Maccy learns about a `defaults write` from another process after a short, unspecified delay, so a script that pauses, copies and resumes in quick succession can still have its copy recorded. To be sure a copy is not recorded, pause from the menu icon or the settings toggle (those take effect immediately), or leave Maccy paused.
@@ -118,7 +113,7 @@ By default, Maccy checks clipboard every 500 ms, which should be enough for most
 to speed it up, you can change it with `defaults`:
 
 ```sh
-defaults write org.p0deje.Maccy clipboardCheckInterval 0.1 # 100 ms
+defaults write <ORG_BUNDLE_ID> clipboardCheckInterval 0.1 # 100 ms
 ```
 
 ## FAQ
@@ -145,7 +140,7 @@ defaults write org.p0deje.Maccy clipboardCheckInterval 0.1 # 100 ms
 If for some reason it doesn't work, run the following command in Terminal.app:
 
 ```sh
-defaults write org.p0deje.Maccy showFooter 1
+defaults write <ORG_BUNDLE_ID> showFooter 1
 ```
 
 ### How to ignore copies from [Universal Clipboard](https://support.apple.com/en-us/102430)?

@@ -597,7 +597,11 @@ class MaccyUITests: XCTestCase {
   }
 
   private func pressStatusItemViaAccessibility() {
-    let pid = NSRunningApplication.runningApplications(withBundleIdentifier: "org.p0deje.Maccy")
+    guard let identifier = Bundle(for: Self.self).object(forInfoDictionaryKey: "MaccyAppBundleIdentifier") as? String else {
+      XCTFail("Missing configured app bundle identifier")
+      return
+    }
+    let pid = NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
       .max { ($0.launchDate ?? .distantPast) < ($1.launchDate ?? .distantPast) }?
       .processIdentifier
     guard let pid else {

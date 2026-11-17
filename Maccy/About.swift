@@ -1,28 +1,28 @@
 import Cocoa
 
 class About {
+  static let repositoryURL = "https://github.com/Frontier-Health/Maccy"
+
   private let familyCredits = NSAttributedString(
     string: "Special thank you to Tonia, Anna & Guy! ❤️",
     attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor]
   )
 
-  private var kossCredits: NSMutableAttributedString {
-    let string = NSMutableAttributedString(string: "Kudos to Sasha Koss for help! 🏂",
-                                           attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor])
-    string.addAttribute(.link, value: "https://koss.nocorp.me", range: NSRange(location: 9, length: 10))
-    return string
-  }
+  // Upstream credits are kept as text. The upstream author's personal links are not carried over.
+  private let kossCredits = NSAttributedString(
+    string: "Kudos to Sasha Koss for help! 🏂",
+    attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor]
+  )
 
+  // One link only: the fork has no public website or support channel.
   private var links: NSMutableAttributedString {
-    let string = NSMutableAttributedString(string: "Website│GitHub│Support",
+    let string = NSMutableAttributedString(string: "Source code",
                                            attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor])
-    string.addAttribute(.link, value: "https://maccy.app", range: NSRange(location: 0, length: 7))
-    string.addAttribute(.link, value: "https://github.com/p0deje/Maccy", range: NSRange(location: 8, length: 6))
-    string.addAttribute(.link, value: "mailto:support@maccy.app", range: NSRange(location: 15, length: 7))
+    string.addAttribute(.link, value: Self.repositoryURL, range: NSRange(location: 0, length: string.length))
     return string
   }
 
-  private var credits: NSMutableAttributedString {
+  var credits: NSMutableAttributedString {
     let credits = NSMutableAttributedString(string: "",
                                             attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor])
     credits.append(links)

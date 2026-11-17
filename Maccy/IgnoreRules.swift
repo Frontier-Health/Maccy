@@ -101,7 +101,7 @@ final class IgnoreRules {
   }
 
   private(set) var lastRejection: Rejection?
-  private let logger = Logger(label: "org.p0deje.Maccy")
+  private let logger = Logger(label: AppIdentity.bundleIdentifier)
 
   var hasInvalidStoredRules: Bool {
     refresh()

@@ -1,9 +1,9 @@
 "Title" = "Geavanceerd";
 "TurnOff" = "Zet uit";
 "TurnOffDescription" = "Negeer tijdelijk alle nieuwe kopieën.\nJe zult het waarschijnlijk programmatisch gebruiken en de apps uitschakelen tijdens het kopiëren van gevoelige gegevens.";
-"TurnOffShellScript" = "defaults write org.p0deje.Maccy captureMode paused\n# kopieer data\ndefaults write org.p0deje.Maccy captureMode capturing";
+"TurnOffShellScript" = "defaults write <BUNDLE_ID> captureMode paused\n# kopieer data\ndefaults write <BUNDLE_ID> captureMode capturing";
 "TurnOffViaMenuIconDescription" = "Je kunt ook op het menu-icoontje klikken terwijl je ⌥ ingedrukt houdt.\nOm alleen de volgende kopie te negeren, klik met ⌥⇧.";
-"TurnOffNextShellScript" = "defaults write org.p0deje.Maccy captureMode skipNext\n# kopieer data";
+"TurnOffNextShellScript" = "defaults write <BUNDLE_ID> captureMode skipNext\n# kopieer data";
 "ClearHistoryOnQuit" = "Wis geschiedenis bij afsluiten";
 "ClearHistoryOnQuitTooltip" = "Verwijder automatisch alle niet vastgemaakte items voordat u de app afsluit.";
 "ClearSystemClipboard" = "Wis ook het systeemklembord";

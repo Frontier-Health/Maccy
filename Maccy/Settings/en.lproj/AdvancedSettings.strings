@@ -1,9 +1,9 @@
 "Title" = "Advanced";
 "TurnOff" = "Turn off";
 "TurnOffDescription" = "Temporarily ignore all new copies.\nYou are likely to use it programmatically and disable application while copying sensitive data. Commands run from a script take effect after a short delay, so to be sure a copy is not recorded, turn Maccy off here or from the menu icon.";
-"TurnOffShellScript" = "defaults write org.p0deje.Maccy captureMode paused\n# copy data\ndefaults write org.p0deje.Maccy captureMode capturing";
+"TurnOffShellScript" = "defaults write <BUNDLE_ID> captureMode paused\n# copy data\ndefaults write <BUNDLE_ID> captureMode capturing";
 "TurnOffViaMenuIconDescription" = "You can also click the menu icon with ⌥ pressed.\nTo ignore only the next copy, click with ⌥⇧.";
-"TurnOffNextShellScript" = "defaults write org.p0deje.Maccy captureMode skipNext\n# copy data";
+"TurnOffNextShellScript" = "defaults write <BUNDLE_ID> captureMode skipNext\n# copy data";
 "ClearHistoryOnQuit" = "Clear history on quit";
 "ClearHistoryOnQuitTooltip" = "Automatically remove all unpinned items before quitting the application.";
 "ClearSystemClipboard" = "Clear the system clipboard too";

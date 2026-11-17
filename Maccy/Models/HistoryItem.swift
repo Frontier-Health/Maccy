@@ -575,7 +575,7 @@ class HistoryItem {
   }
 
   nonisolated private static let textRecognitionQueue = DispatchQueue(
-    label: "org.p0deje.Maccy.textRecognition",
+    label: AppIdentity.bundleIdentifier + ".textRecognition",
     qos: .utility
   )
 
@@ -636,10 +636,10 @@ nonisolated enum HistoryItemTitleSource: Equatable, Sendable {
   // Stored before titles recorded their source.
   case unknown
 
-  private static let userValue = "org.p0deje.Maccy.title.user"
-  private static let universalClipboardImageValue = "org.p0deje.Maccy.title.universalClipboardImage"
-  private static let nothingValue = "org.p0deje.Maccy.title.nothing"
-  private static let unknownValue = "org.p0deje.Maccy.title.unknown"
+  private static let userValue = "\(AppIdentity.bundleIdentifier).title.user"
+  private static let universalClipboardImageValue = "\(AppIdentity.bundleIdentifier).title.universalClipboardImage"
+  private static let nothingValue = "\(AppIdentity.bundleIdentifier).title.nothing"
+  private static let unknownValue = "\(AppIdentity.bundleIdentifier).title.unknown"
   private static let contentPrefix = "content:"
 
   init(rawValue: String) {

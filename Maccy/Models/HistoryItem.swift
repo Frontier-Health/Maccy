@@ -1008,8 +1008,8 @@ nonisolated final class TextRecognitionJob: @unchecked Sendable {
 
 // One read of a Universal Clipboard file in the background, awaited by
 // everything that needs it and cancelled when the item's images are cleaned
-// up.
-final class UniversalClipboardFileLoad {
+// up. Immutable, so it can be cancelled from any context.
+nonisolated final class UniversalClipboardFileLoad: Sendable {
   let url: URL
   private let cancellation: UniversalClipboardFile.Cancellation
   private let task: Task<Data?, Never>

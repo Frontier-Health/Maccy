@@ -212,7 +212,7 @@ extension SharedStateTests {
     let pasteboard = NSPasteboard.general
     let preferences = Defaults.Keys.enabledPasteboardTypes.suite
 
-    let savedEnabledTypes: Any?
+    let savedEnabledTypes = SavedStoragePreference()
     let savedCaptureSettings = SavedCaptureSettings(Clipboard.shared.capturePreferences)
     let savedIgnoreRegexp = Defaults[.ignoreRegexp]
     let savedIgnoreAllAppsExceptListed = Defaults[.ignoreAllAppsExceptListed]
@@ -220,7 +220,6 @@ extension SharedStateTests {
     let savedIgnoredPasteboardTypes = Defaults[.ignoredPasteboardTypes]
 
     init() {
-      savedEnabledTypes = preferences.object(forKey: StoragePolicy.preferenceKey)
       preferences.removeObject(forKey: StoragePolicy.preferenceKey)
       Defaults[.ignoreRegexp] = []
       Defaults[.ignoredApps] = []
@@ -233,11 +232,7 @@ extension SharedStateTests {
     }
 
     deinit {
-      if let savedEnabledTypes {
-        preferences.set(savedEnabledTypes, forKey: StoragePolicy.preferenceKey)
-      } else {
-        preferences.removeObject(forKey: StoragePolicy.preferenceKey)
-      }
+      savedEnabledTypes.restore()
       savedCaptureSettings.restore()
       Defaults[.ignoreRegexp] = savedIgnoreRegexp
       Defaults[.ignoreAllAppsExceptListed] = savedIgnoreAllAppsExceptListed
@@ -489,6 +484,24 @@ extension SharedStateTests {
       try context.save()
       let stored = try context.fetch(FetchDescriptor<HistoryItemContent>()).map(\.type)
       #expect(stored.sorted() == expected.sorted(), sourceLocation: sourceLocation)
+    }
+  }
+}
+
+// The raw storage preference, so a test can start from none and restore it.
+struct SavedStoragePreference: @unchecked Sendable {
+  let defaults = Defaults.Keys.enabledPasteboardTypes.suite
+  let value: Any?
+
+  init() {
+    value = defaults.object(forKey: StoragePolicy.preferenceKey)
+  }
+
+  func restore() {
+    if let value {
+      defaults.set(value, forKey: StoragePolicy.preferenceKey)
+    } else {
+      defaults.removeObject(forKey: StoragePolicy.preferenceKey)
     }
   }
 }

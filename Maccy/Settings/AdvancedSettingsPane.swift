@@ -30,6 +30,20 @@ struct AdvancedSettingsPane: View {
 
       Divider()
 
+      Defaults.Toggle(key: .intentsEnabled) {
+        if UserDefaults.standard.objectIsForced(forKey: "intentsEnabled") {
+          Label {
+            Text("IntentsEnabled", tableName: "AdvancedSettings")
+          } icon: {
+            Image(systemName: "lock.fill")
+          }
+        } else {
+          Text("IntentsEnabled", tableName: "AdvancedSettings")
+        }
+      }
+      .disabled(UserDefaults.standard.objectIsForced(forKey: "intentsEnabled"))
+      .help(Text("IntentsEnabledTooltip", tableName: "AdvancedSettings"))
+
       Defaults.Toggle(key: .clearOnQuit) {
         Text("ClearHistoryOnQuit", tableName: "AdvancedSettings")
       }.help(Text("ClearHistoryOnQuitTooltip", tableName: "AdvancedSettings"))

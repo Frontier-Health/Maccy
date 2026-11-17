@@ -8,3 +8,5 @@
 "ClearHistoryOnQuitTooltip" = "Automatically remove all unpinned items before quitting the application.";
 "ClearSystemClipboard" = "Clear the system clipboard too";
 "ClearSystemClipboardTooltip" = "When enabled, clearing the history would also clear the current system clipboard.";
+"IntentsEnabled" = "Allow Shortcuts to access clipboard history";
+"IntentsEnabledTooltip" = "Allow App Intents to read, select and delete clipboard items. A lock means this setting is managed by your organisation.";

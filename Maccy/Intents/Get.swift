@@ -5,11 +5,13 @@ private nonisolated struct ItemContents: Sendable {
   let text: String?
   let html: Data?
   let file: URL?
-  let image: Data?
+  let image: URL?
   let rtf: Data?
 }
 
 struct Get: AppIntent, CustomIntentMigratedAppIntent {
+  static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
   static let intentClassName = "GetIntent"
 
   static let title: LocalizedStringResource = "Get Item from Clipboard History"
@@ -23,8 +25,6 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
 
   @Parameter(title: "Number", default: 1)
   var number: Int
-
-  private let positionOffset = 1
 
   static var parameterSummary: some ParameterSummary {
     When(\.$selected, .equalTo, false) {
@@ -41,14 +41,12 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
 
   func perform() async throws -> some IntentResult & ReturnsValue<HistoryItemAppEntity> {
     let contents = try await MainActor.run { () -> ItemContents in
+      try HistoryIntentAccess.requireEnabled()
       var item: HistoryItem?
       if selected {
         item = AppState.shared.navigator.selection.first?.item
       } else {
-        let index = number - positionOffset
-        if AppState.shared.history.items.count >= index {
-          item = AppState.shared.history.items[index].item
-        }
+        item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items).item
       }
 
       guard let item else {
@@ -59,7 +57,7 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
         text: item.text,
         html: item.htmlData,
         file: item.fileURLs.first,
-        image: item.imageData,
+        image: try item.imageData.map { try IntentImageExports.write($0) },
         rtf: item.rtfData
       )
     }
@@ -75,10 +73,8 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
       intentItem.file = fileURL
     }
 
-    if let imageData = contents.image {
-      let file = URL.documentsDirectory.appending(path: "image.png")
-      try imageData.write(to: file, options: [.atomic, .completeFileProtection])
-      intentItem.image = file
+    if let imageURL = contents.image {
+      intentItem.image = IntentFile(fileURL: imageURL, type: .png)
     }
 
     if let rtf = contents.rtf {

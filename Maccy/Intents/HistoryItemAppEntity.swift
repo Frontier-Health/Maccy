@@ -10,7 +10,7 @@ struct HistoryItemAppEntity: TransientAppEntity {
   var html: String?
 
   @Property(title: "Image")
-  var image: URL?
+  var image: IntentFile?
 
   @Property(title: "Rich Text")
   var richText: String?

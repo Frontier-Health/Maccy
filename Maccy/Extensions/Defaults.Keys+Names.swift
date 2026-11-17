@@ -34,6 +34,7 @@ nonisolated extension Defaults.Keys {
   static let ignoreAllAppsExceptListed = Key<Bool>("ignoreAllAppsExceptListed", default: false, suite: preferencesSuite)
   static let ignoreEvents = Key<Bool>("ignoreEvents", default: false, suite: preferencesSuite)
   static let ignoreOnlyNextEvent = Key<Bool>("ignoreOnlyNextEvent", default: false, suite: preferencesSuite)
+  static let intentsEnabled = Key<Bool>("intentsEnabled", default: true, suite: preferencesSuite)
   static let ignoreRegexp = Key<[String]>("ignoreRegexp", default: [], suite: preferencesSuite)
   static let ignoredApps = Key<[String]>("ignoredApps", default: [], suite: preferencesSuite)
   static let ignoredPasteboardTypes = Key<Set<String>>(

@@ -236,6 +236,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func clear() {
+    IntentImageExports.removeAll()
     withLogging("Clearing history") {
       allUnpinnedItems.forEach(cleanup)
       allUnpinnedItems.removeAll()
@@ -265,6 +266,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func clearAll() {
+    IntentImageExports.removeAll()
     withLogging("Clearing all history") {
       allPinnedItems.forEach(cleanup)
       allUnpinnedItems.forEach(cleanup)
@@ -342,6 +344,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func cleanup(_ item: HistoryItemDecorator) {
+    IntentImageExports.removeAll()
     item.cleanupImages()
   }
 

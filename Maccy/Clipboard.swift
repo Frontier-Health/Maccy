@@ -81,12 +81,13 @@ class Clipboard {
     start()
   }
 
-  // Pause, resume or skip from the UI. Resuming also treats everything already
-  // on the pasteboard as seen, so a copy made while paused is never recorded.
+  // Pause, resume or skip from the UI. Resuming or arming a skip also treats
+  // everything already on the pasteboard as seen, so a copy made while paused is
+  // never recorded and the skip applies to the very next copy.
   @discardableResult
   func perform(_ request: CaptureModeRequest) -> CaptureMode {
     let mode = CaptureMode.perform(request, in: capturePreferences)
-    if mode == .capturing {
+    if mode != .paused {
       syncCaptureState()
     }
     return mode
@@ -271,6 +272,9 @@ class Clipboard {
       let isMaccySource = pasteboard.string(forType: .source) == NSPasteboard.PasteboardType.fromMaccy.rawValue
       if !isFromMaccy && !isMaccySource {
         CaptureMode.consumeSkip(in: capturePreferences)
+        // The watcher's own write is not an uncertain transition, so the copy
+        // after the skipped one is recorded.
+        syncCaptureState()
       }
 
       return

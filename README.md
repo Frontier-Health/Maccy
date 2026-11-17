@@ -75,17 +75,17 @@ You can tell Maccy to ignore all copied items:
 defaults write org.p0deje.Maccy captureMode paused # default is capturing
 ```
 
-This is useful if you have some workflow for copying sensitive data. You can set `captureMode` to `paused`, copy the data and set `captureMode` back to `capturing`.
+A script can set `captureMode` to `paused`, copy the data and set `captureMode` back to `capturing`. Treat this as best-effort, not as a guarantee: Maccy learns about a `defaults write` from another process after a short, unspecified delay, so a script that pauses, copies and resumes in quick succession can still have its copy recorded. To be sure a copy is not recorded, pause from the menu icon or the settings toggle (those take effect immediately), or leave Maccy paused.
 
 To ignore only the next copy, set `captureMode` to `skipNext`. Maccy switches back to `capturing` after skipping one copy that it would otherwise have recorded. Copies it ignores anyway (empty, concealed or transient, from ignored apps, of ignored types or matching ignore patterns) and Maccy's own copies don't use up the skip.
 
-Any value of `captureMode` other than exactly `capturing`, `paused` or `skipNext` is treated as `paused`. If you pause, copy and resume quickly, Maccy discards the copy rather than guess whether it came before or after the resume.
+Any value of `captureMode` other than exactly `capturing`, `paused` or `skipNext` is treated as `paused`. When Maccy notices that a capture setting changed since its last check, it discards the copy it finds rather than guess whether it came before or after the change.
 
 The older `ignoreEvents` and `ignoreOnlyNextEvent` keys still work, but only to make Maccy capture less: `ignoreEvents` set to true pauses Maccy until it is set back to false or removed, and `ignoreOnlyNextEvent` set to true skips the next copy and is then removed. Use `captureMode` in new scripts.
 
 You can also click the menu icon with <kbd>OPTION (⌥)</kbd> pressed. To ignore only the next copy, click with <kbd>OPTION (⌥)</kbd> + <kbd>SHIFT (⇧)</kbd> pressed.
 
-If a configuration profile manages `captureMode`, or sets `ignoreEvents` or `ignoreOnlyNextEvent` to true, the settings toggle and the menu icon clicks can't change whether Maccy captures. A managed `captureMode` of `skipNext` is treated as `paused`.
+If a configuration profile manages `captureMode`, or sets `ignoreEvents` or `ignoreOnlyNextEvent` to true, the settings toggle and the menu icon clicks can't change whether Maccy captures. A managed `captureMode` of `skipNext` is treated as `paused`. While `captureMode` is managed, an `ignoreOnlyNextEvent` set to true also pauses Maccy, and the old keys are not removed for you: delete them with `defaults delete` to resume.
 
 ### Ignore Custom Copy Types
 

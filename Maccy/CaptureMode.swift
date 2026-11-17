@@ -66,8 +66,9 @@ nonisolated enum CaptureMode: String, CaseIterable, Sendable {
   //   forced by a profile) makes it `paused`.
   // - A legacy `ignoreOnlyNextEvent` that reads true makes it at least
   //   `skipNext` until the watcher moves it into `captureMode` (see
-  //   `absorbLegacyOneShot(in:)`); if a profile forces it, it can't be removed,
-  //   so it counts as `paused`.
+  //   `absorbLegacyOneShot(in:)`). It counts as `paused` if it can't be moved
+  //   there: a profile forces it, so it can't be removed, or a profile forces
+  //   `captureMode`, so the skip could never be stored or spent.
   static func effective(in defaults: UserDefaults) -> CaptureMode {
     var mode = stored(in: defaults)
     if mode == .skipNext && defaults.objectIsForced(forKey: defaultsKey) {
@@ -79,7 +80,7 @@ nonisolated enum CaptureMode: String, CaseIterable, Sendable {
     }
 
     if legacyFlag(legacyIgnoreOnlyNextEventKey, in: defaults) == true {
-      mode = mode.atLeast(defaults.objectIsForced(forKey: legacyIgnoreOnlyNextEventKey) ? .paused : .skipNext)
+      mode = mode.atLeast(legacyOneShotCanBeAbsorbed(in: defaults) ? .skipNext : .paused)
     }
 
     return mode
@@ -99,6 +100,12 @@ nonisolated enum CaptureMode: String, CaseIterable, Sendable {
     return [legacyIgnoreEventsKey, legacyIgnoreOnlyNextEventKey].contains { key in
       defaults.objectIsForced(forKey: key) && legacyFlag(key, in: defaults) == true
     }
+  }
+
+  // Whether a legacy `ignoreOnlyNextEvent` can be turned into a `skipNext` that
+  // Maccy is able to spend: neither it nor `captureMode` is pinned by a profile.
+  static func legacyOneShotCanBeAbsorbed(in defaults: UserDefaults) -> Bool {
+    !defaults.objectIsForced(forKey: legacyIgnoreOnlyNextEventKey) && !defaults.objectIsForced(forKey: defaultsKey)
   }
 
   // A legacy boolean key: nil if absent; false for a boolean false or the strings
@@ -163,12 +170,12 @@ nonisolated enum CaptureMode: String, CaseIterable, Sendable {
 
   // An `ignoreOnlyNextEvent` written after migration (by an old script) arms a
   // one-shot skip and is then removed, so it skips one copy and not every copy.
-  // If it is forced, it is left alone and `effective(in:)` treats it as paused;
-  // if it is still there after removal (it lives in another domain, such as the
-  // global one), `captureMode` is set to `paused`.
+  // If it or `captureMode` is forced, it is left alone and `effective(in:)`
+  // treats it as paused; if it is still there after removal (it lives in another
+  // domain, such as the global one), `captureMode` is set to `paused`.
   static func absorbLegacyOneShot(in defaults: UserDefaults) {
     guard legacyFlag(legacyIgnoreOnlyNextEventKey, in: defaults) == true,
-          !defaults.objectIsForced(forKey: legacyIgnoreOnlyNextEventKey) else {
+          legacyOneShotCanBeAbsorbed(in: defaults) else {
       return
     }
 
@@ -212,6 +219,10 @@ nonisolated enum CaptureMode: String, CaseIterable, Sendable {
   // downgraded to a one-shot. The old keys are then removed (a no-op for keys a
   // profile forces).
   //
+  // If a profile forces `captureMode`, the migrated value can't be stored, so
+  // the old keys are kept: removing them would drop a pause or one-shot that
+  // nothing replaces. They keep restricting capture through `effective(in:)`.
+  //
   // The old keys are still honoured after migration, through `effective(in:)`
   // and `absorbLegacyOneShot(in:)`.
   //
@@ -228,11 +239,13 @@ nonisolated enum CaptureMode: String, CaseIterable, Sendable {
     )
     let current = stored(in: defaults)
     let migrated = current.atLeast(legacy)
-    if migrated != current {
-      defaults.set(migrated.rawValue, forKey: defaultsKey)
+    if !defaults.objectIsForced(forKey: defaultsKey) {
+      if migrated != current {
+        defaults.set(migrated.rawValue, forKey: defaultsKey)
+      }
+      defaults.removeObject(forKey: legacyIgnoreEventsKey)
+      defaults.removeObject(forKey: legacyIgnoreOnlyNextEventKey)
     }
-    defaults.removeObject(forKey: legacyIgnoreEventsKey)
-    defaults.removeObject(forKey: legacyIgnoreOnlyNextEventKey)
     defaults.set(true, forKey: migrationMarkerKey)
 
     return migrated

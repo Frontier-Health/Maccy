@@ -243,12 +243,24 @@ extension SharedStateTests {
       #expect(checkNow().isEmpty)
       #expect(storedCaptureMode == .capturing)
 
-      // A change seen at the check right after the skip is used is discarded
-      // too, because it can't be told apart from the skipped copy.
+      // Using up the skip is the watcher's own write, not an uncertain
+      // transition, so the very next copy is recorded.
       copyString("right after")
+      #expect(checkNow().count == 1)
+    }
+
+    @Test("Skip next armed from the menu icon skips the very next copy and only that one")
+    func skipNextArmedFromUISkipsExactlyOneCopy() throws {
       #expect(checkNow().isEmpty)
 
-      copyString("later")
+      clipboard.perform(.toggleSkipNext)
+      #expect(storedCaptureMode == .skipNext)
+
+      copyString("password")
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .capturing)
+
+      copyString("next copy")
       #expect(checkNow().count == 1)
     }
 
@@ -856,6 +868,46 @@ struct CaptureModeTests {
     #expect(CaptureMode.effective(in: defaults) == .paused)
     #expect(CaptureMode.isLockedByProfile(in: defaults))
     #expect(CaptureMode.perform(.resume, in: defaults) == .paused)
+  }
+
+  @Test("With a forced captureMode, migration keeps a legacy pause it can't replace")
+  func forcedCaptureModeKeepsLegacyPause() throws {
+    let defaults = try Self.makeManagedDefaults([CaptureMode.defaultsKey: CaptureMode.capturing.rawValue])
+    defaults.set(true, forKey: CaptureMode.legacyIgnoreEventsKey)
+    #expect(CaptureMode.effective(in: defaults) == .paused)
+
+    CaptureMode.migrateLegacyDefaults(in: defaults)
+
+    #expect(CaptureMode.legacyFlag(CaptureMode.legacyIgnoreEventsKey, in: defaults) == true)
+    #expect(CaptureMode.effective(in: defaults) == .paused)
+  }
+
+  @Test("With a forced captureMode, a legacy one-shot pauses and is kept by migration and the watcher")
+  func forcedCaptureModeTurnsLegacyOneShotIntoPause() throws {
+    let defaults = try Self.makeManagedDefaults([CaptureMode.defaultsKey: CaptureMode.capturing.rawValue])
+    defaults.set(true, forKey: CaptureMode.legacyIgnoreOnlyNextEventKey)
+    #expect(CaptureMode.effective(in: defaults) == .paused)
+
+    CaptureMode.migrateLegacyDefaults(in: defaults)
+    #expect(CaptureMode.effective(in: defaults) == .paused)
+
+    CaptureMode.absorbLegacyOneShot(in: defaults)
+    CaptureMode.consumeSkip(in: defaults)
+
+    #expect(CaptureMode.legacyFlag(CaptureMode.legacyIgnoreOnlyNextEventKey, in: defaults) == true)
+    #expect(CaptureMode.effective(in: defaults) == .paused)
+  }
+
+  @Test("A legacy one-shot written after migration pauses while captureMode is forced")
+  func forcedCaptureModeLegacyOneShotAfterMigration() throws {
+    let defaults = try Self.makeManagedDefaults([CaptureMode.defaultsKey: CaptureMode.capturing.rawValue])
+    CaptureMode.migrateLegacyDefaults(in: defaults)
+    #expect(CaptureMode.effective(in: defaults) == .capturing)
+
+    defaults.set("true", forKey: CaptureMode.legacyIgnoreOnlyNextEventKey)
+    CaptureMode.absorbLegacyOneShot(in: defaults)
+
+    #expect(CaptureMode.effective(in: defaults) == .paused)
   }
 
   // MARK: Migration

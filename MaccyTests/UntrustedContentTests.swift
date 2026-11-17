@@ -433,11 +433,10 @@ extension SharedStateTests {
       #expect(ValidatedImage.cgImage(from: small, for: .preview) != nil)
       #expect(await ValidatedImage.decode(small, for: .preview) != nil)
       #expect(await smallItem.decodedImage(for: .preview) != nil)
-      // DIAGNOSTIC (temporary): the same through a temporary item.
-      let temporary = await imageItem(small).decodedImage(for: .preview)
-      let temporaryTrace = HistoryItem.decodedImageTraceForTesting
-      print("DIAGNOSTIC temporary item trace: \(temporaryTrace)")
-      #expect(temporary != nil, "\(temporaryTrace)")
+      // A temporary item, as the test was first written (see
+      // `imageSourceIdentityIsStable`).
+      #expect(imageItem(small).imagePixelSize == NSSize(width: 10, height: 10))
+      #expect(await imageItem(small).decodedImage(for: .preview) != nil)
       let largeItem = imageItem(large)
       #expect(largeItem.imagePixelSize == nil)
       #expect(await largeItem.decodedImage(for: .preview) == nil)
@@ -1083,6 +1082,30 @@ extension SharedStateTests {
       #expect(item.contents.first?.value == tiff)
     }
 
+    @Test("An image source names its content by type and revision, stable across saves and new objects")
+    func imageSourceIdentityIsStable() async throws {
+      let png = try pngData(width: 6, height: 6)
+      let item = imageItem(png)
+      let before = try #require(item.imageSource(readableBy: StoragePolicy.currentReadAllowList))
+
+      // PROBE: whether SwiftData hands back the same object for the same row.
+      // Both objects are held, so an address can't be reused in between.
+      let first = item.contents.first
+      let again = item.contents.first
+      try Storage.shared.context.save()
+      let afterSave = item.contents.first
+      print("PROBE content identity: unsaved same object=\(first === again) after save same object=\(first === afterSave)")
+
+      // The source taken before the save still names the same image.
+      #expect(item.imageSource(readableBy: StoragePolicy.currentReadAllowList) == before)
+      #expect(await item.decodedImage(for: .thumbnail) != nil)
+
+      // After the contents change, a source taken earlier no longer matches.
+      item.contentsDidChange()
+      #expect(item.imageSource(readableBy: StoragePolicy.currentReadAllowList) != before)
+      #expect(item.contentRevision > 0)
+    }
+
     // MARK: Second review round: when "too large" is announced
 
     @Test("An oversized copy is announced only if it would otherwise have been saved",
@@ -1147,11 +1170,16 @@ extension SharedStateTests {
         pasteboard.writeObjects([item])
         return History.shared.added(try #require(checkNow().first)).formattedTextComparison
       }
-      let header = #"{\rtf1\ansi\deff0{\fonttbl{\f0 Helvetica;}}{\colortbl;\red255\green255\blue255;}\f0\fs24 "#
+      let header = #"{\rtf1\ansi\deff0{\fonttbl{\f0 Helvetica;}}"# +
+        #"{\colortbl;\red255\green255\blue255;\red200\green0\blue0;}\f0\fs24 "#
       // The reviewer's input: white on "Do not ", default on the rest.
       #expect(try comparison(header + #"{\cf1 Do not }pay Mallory 100}"#, plain: "Do not pay Mallory 100")
               == .renderingNotChecked)
-      #expect(try comparison(header + #"{\cb1 Pay} Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"{\cb2 Pay} Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      // Word's highlight and shading, which AppKit's reader ignores.
+      #expect(try comparison(header + #"{\highlight2 Pay} Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"{\chcbpat2 Pay} Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"Pay {\v hidden}Alice 100}"#, plain: "Pay hiddenAlice 100") == .renderingNotChecked)
       #expect(try comparison(header + #"{\fs4 Pay} Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
       #expect(try comparison(header + #"Pay Alice {\super 100}}"#, plain: "Pay Alice 100") == .renderingNotChecked)
       #expect(try comparison(header + #"Pay {\strike Alice} 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)

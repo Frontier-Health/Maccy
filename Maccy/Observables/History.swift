@@ -1345,6 +1345,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     deleteContents(of: newItem)
     newItem.contents = existingItem.contents
     existingItem.contents = []
+    newItem.contentsDidChange()
+    existingItem.contentsDidChange()
   }
 
   @MainActor

@@ -186,23 +186,41 @@ enum RichTextImport {
     return !PlainHTML.isPlain(source)
   }
 
-  // Whether RTF marks text hidden (`\v`): AppKit's reader keeps text a
-  // renderer doesn't show, and has no attribute for it.
+  // Formatting AppKit's reader drops but other renderers apply, found in the
+  // RTF itself: hidden text (`\v`, which AppKit keeps as ordinary text) and
+  // Word's highlight and character shading (`\highlightN`, `\chcbpatN` with
+  // N > 0), which AppKit ignores.
   nonisolated static func rtfMayRenderDifferently(_ data: Data) -> Bool {
     let bytes = [UInt8](data)
+    func isLetter(_ byte: UInt8) -> Bool { (0x41...0x5A).contains(byte) || (0x61...0x7A).contains(byte) }
     var index = 0
-    while index + 1 < bytes.count {
-      // `\v` not followed by a letter (`\viewkind` is another word); `\v0`
-      // turns hidden text off but still says the document uses it.
-      if bytes[index] == 0x5C, bytes[index + 1] == 0x76,
-         index == 0 || bytes[index - 1] != 0x5C {
-        let next = index + 2 < bytes.count ? bytes[index + 2] : 0x20
-        let isLetter = (0x41...0x5A).contains(next) || (0x61...0x7A).contains(next)
-        if !isLetter {
-          return true
-        }
+    while index < bytes.count {
+      guard bytes[index] == 0x5C else {
+        index += 1
+        continue
       }
       index += 1
+      guard index < bytes.count, isLetter(bytes[index]) else {
+        // An escaped character (`\\`, `\{`, `\'hh`…) is not a control word.
+        index += 1
+        continue
+      }
+      let nameStart = index
+      while index < bytes.count && isLetter(bytes[index]) { index += 1 }
+      let name = String(decoding: bytes[nameStart..<index], as: UTF8.self)
+      let numberStart = index
+      if index < bytes.count && bytes[index] == 0x2D { index += 1 }
+      while index < bytes.count && (0x30...0x39).contains(bytes[index]) { index += 1 }
+      let number = Int(String(decoding: bytes[numberStart..<index], as: UTF8.self))
+      switch name {
+      case "v":
+        // `\v0` turns hidden text off but still says the document uses it.
+        return true
+      case "highlight", "chcbpat":
+        if (number ?? 1) > 0 { return true }
+      default:
+        break
+      }
     }
     return false
   }

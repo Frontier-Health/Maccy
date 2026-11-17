@@ -467,6 +467,9 @@ class Storage {
     for content in item.contents where sanitize(content, of: item, to: allowList, undo: undo) {
       changed = true
     }
+    if changed {
+      item.contentsDidChange()
+    }
     return changed
   }
 
@@ -552,7 +555,7 @@ final class CleanUpUndoLog {
       let contents = item.contents
       return {
         item.contents = contents
-        item.clearDecodedImageCache()
+        item.contentsDidChange()
       }
     }
   }

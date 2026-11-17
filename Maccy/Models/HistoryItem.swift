@@ -106,6 +106,12 @@ class HistoryItem {
   // Raised by `clearDecodedImageCache()`. A load or decode that started under
   // an earlier value is discarded when it completes.
   @Transient private var imageGeneration = 0
+  // Raised by `contentsDidChange()` whenever representations are added,
+  // removed or replaced. An image source names its content by type and this
+  // revision, never by object identity: SwiftData may hand back a different
+  // object for the same row, and an `ObjectIdentifier` is only unique while
+  // its object is alive.
+  @Transient private(set) var contentRevision = 0
 
   init(contents: [HistoryItemContent] = []) {
     self.firstCopiedAt = firstCopiedAt
@@ -675,7 +681,7 @@ class HistoryItem {
 
   func imageSource(readableBy allowList: StorageAllowList) -> HistoryItemImageSource? {
     if let content = firstContent(Self.imageTypes, readableBy: allowList), content.value != nil {
-      return .content(content.type, ObjectIdentifier(content))
+      return .content(content.type, revision: contentRevision)
     }
 
     if let url = universalClipboardImageURL(readableBy: allowList) {
@@ -687,8 +693,11 @@ class HistoryItem {
 
   private func imageData(from source: HistoryItemImageSource) -> Data? {
     switch source {
-    case .content(_, let id):
-      return contents.first { ObjectIdentifier($0) == id }?.value
+    case .content(let type, let revision):
+      guard revision == contentRevision else {
+        return nil
+      }
+      return canonicalContent(ofType: type)?.value
     case .universalClipboardFile(let url):
       // Never read here, on the caller's (main) thread: only what
       // `loadImageIfNeeded()` read in the background.
@@ -776,56 +785,22 @@ class HistoryItem {
   // `ValidatedImage` off the main actor. Nil when there is none, it is
   // refused, the calling task was cancelled, or meanwhile the item was
   // deleted, its images were cleaned up, or the image may no longer be read.
-  #if DEBUG
-  // DIAGNOSTIC (temporary): which nil path `decodedImage` took, with the
-  // identities involved.
-  @MainActor static var decodedImageTraceForTesting: [String] = []
-  @MainActor private func traceIdentities(_ label: String) {
-    let ids = contents.map { "\($0.type)#\(ObjectIdentifier($0).hashValue)/\($0.persistentModelID.hashValue)" }
-    Self.decodedImageTraceForTesting.append("\(label): contents=\(ids) source=\(String(describing: imageSource(readableBy: StoragePolicy.currentReadAllowList)))")
-  }
-  #endif
-
   @MainActor
   func decodedImage(for purpose: ValidatedImage.Purpose) async -> DecodedImage? {
-    #if DEBUG
-    Self.decodedImageTraceForTesting = []
-    #endif
     guard !Task.isCancelled else {
-      #if DEBUG
-      Self.decodedImageTraceForTesting.append("nil: cancelled before load")
-      #endif
       return nil
     }
     await loadImageIfNeeded()
     let generation = imageGeneration
-    #if DEBUG
-    traceIdentities("before decode")
-    #endif
     guard !Task.isCancelled, !isDeleted,
           let source = imageSource(readableBy: StoragePolicy.currentReadAllowList),
           let data = imageData(from: source) else {
-      #if DEBUG
-      Self.decodedImageTraceForTesting.append(
-        "nil: before decode cancelled=\(Task.isCancelled) deleted=\(isDeleted) " +
-        "source=\(imageSource(readableBy: StoragePolicy.currentReadAllowList) != nil)")
-      #endif
       return nil
     }
 
     let decoded = await ValidatedImage.decode(data, for: purpose)
-    #if DEBUG
-    traceIdentities("after decode")
-    if decoded == nil { Self.decodedImageTraceForTesting.append("nil: decode failed") }
-    #endif
     guard !Task.isCancelled, generation == imageGeneration, !isDeleted,
           imageSource(readableBy: StoragePolicy.currentReadAllowList) == source else {
-      #if DEBUG
-      Self.decodedImageTraceForTesting.append(
-        "nil: after decode cancelled=\(Task.isCancelled) generation=\(generation == imageGeneration) " +
-        "deleted=\(isDeleted) sameSource=\(imageSource(readableBy: StoragePolicy.currentReadAllowList) == source) " +
-        "storageHasChanges=\(Storage.shared.context.hasChanges)")
-      #endif
       return nil
     }
     return decoded
@@ -833,6 +808,14 @@ class HistoryItem {
 
   var rtfData: Data? { rtfData(readableBy: StoragePolicy.currentReadAllowList) }
   func rtfData(readableBy allowList: StorageAllowList) -> Data? { contentData([.rtf], readableBy: allowList) }
+
+  // Call after adding, removing or replacing representations: an image source
+  // or inspection taken before no longer matches, and work in flight is
+  // discarded.
+  func contentsDidChange() {
+    contentRevision += 1
+    clearDecodedImageCache()
+  }
 
   // Forgets the image's inspection and the Universal Clipboard file read,
   // cancels a read in progress, and makes every load and decode still in
@@ -888,6 +871,7 @@ class HistoryItem {
     } else {
       contents.append(HistoryItemContent(type: stringType, value: data))
     }
+    contentsDidChange()
     // A derived title follows the edited text; an alias is kept.
     if titleSource != .user {
       regenerateTitle(readableBy: policy.readAllowList, recognizingImageText: false)
@@ -1114,7 +1098,7 @@ nonisolated struct UniversalClipboardFileData {
 // Where an item's image comes from: a stored representation, or the file a
 // Universal Clipboard copy points to.
 nonisolated enum HistoryItemImageSource: Equatable {
-  case content(String, ObjectIdentifier)
+  case content(String, revision: Int)
   case universalClipboardFile(URL)
 }
 

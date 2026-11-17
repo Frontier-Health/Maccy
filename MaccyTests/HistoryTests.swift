@@ -43,12 +43,14 @@ extension SharedStateTests {
     @Test("A deferred selection runs once, with the modifier keys held when it was scheduled")
     func deferredSelectionUsesTheFlagsItWasScheduledWith() async throws {
       let deferred = DeferredSelection()
+      deferred.sleepForTesting = {}
       let log = SelectionLog()
       deferred.schedule(flags: [.command, .shift], after: .milliseconds(10)) { log.flags.append($0) }
+      let pending = deferred.pendingTaskForTesting
       #expect(deferred.isPending)
       #expect(log.flags.isEmpty)
 
-      try await Task.sleep(for: .milliseconds(300))
+      await pending?.value
       #expect(log.flags == [[.command, .shift]])
       #expect(!deferred.isPending)
     }
@@ -56,23 +58,29 @@ extension SharedStateTests {
     @Test("A cancelled deferred selection never runs")
     func cancelledDeferredSelectionNeverRuns() async throws {
       let deferred = DeferredSelection()
+      deferred.sleepForTesting = {}
       let log = SelectionLog()
       deferred.schedule(flags: [], after: .milliseconds(10)) { log.flags.append($0) }
+      let pending = deferred.pendingTaskForTesting
       deferred.cancel()
       #expect(!deferred.isPending)
 
-      try await Task.sleep(for: .milliseconds(300))
+      await pending?.value
       #expect(log.flags.isEmpty)
     }
 
     @Test("A new deferred selection replaces the one still waiting")
     func newDeferredSelectionReplacesThePendingOne() async throws {
       let deferred = DeferredSelection()
+      deferred.sleepForTesting = {}
       let log = SelectionLog()
       deferred.schedule(flags: [.option], after: .milliseconds(10)) { log.flags.append($0) }
+      let replaced = deferred.pendingTaskForTesting
       deferred.schedule(flags: [.command], after: .milliseconds(10)) { log.flags.append($0) }
+      let pending = deferred.pendingTaskForTesting
+      await replaced?.value
 
-      try await Task.sleep(for: .milliseconds(300))
+      await pending?.value
       #expect(log.flags == [[.command]])
     }
 
@@ -80,14 +88,89 @@ extension SharedStateTests {
     func closingThePopupDropsThePendingSelection() async throws {
       let popup = AppState.shared.popup
       let log = SelectionLog()
-      popup.deferredSelection.schedule(flags: [.command], after: .milliseconds(10)) { log.flags.append($0) }
+      popup.deferredSelection.sleepForTesting = {}
+      defer { popup.deferredSelection.sleepForTesting = nil }
+      popup.deferredSelection.schedule(flags: [.command]) { log.flags.append($0) }
+      let pending = popup.deferredSelection.pendingTaskForTesting
 
       // The panel calls this when it closes.
       popup.reset()
       #expect(!popup.deferredSelection.isPending)
 
-      try await Task.sleep(for: .milliseconds(300))
+      await pending?.value
       #expect(log.flags.isEmpty)
+    }
+
+    private func shortcutEvent(flags: NSEvent.ModifierFlags) throws -> NSEvent {
+      try #require(NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+        windowNumber: 0, context: nil, characters: "1", charactersIgnoringModifiers: "1",
+        isARepeat: false, keyCode: 18
+      ))
+    }
+
+    @Test("Shortcut wiring selects the event's item and captures its flags before deferring")
+    func shortcutEventCapturesFlags() async throws {
+      let popup = AppState.shared.popup
+      popup.deferredSelection.sleepForTesting = {}
+      defer {
+        popup.reset()
+        popup.deferredSelection.sleepForTesting = nil
+      }
+      let item = history.added(historyItem("shortcut item"))
+      let event = try shortcutEvent(flags: [.command, .capsLock])
+      let log = SelectionLog()
+      #expect(popup.scheduleShortcutSelection(for: event) { selected, flags in
+        #expect(selected == item)
+        log.flags.append(flags)
+      })
+      let pending = popup.deferredSelection.pendingTaskForTesting
+      #expect(log.flags.isEmpty)
+      // There is no current AppKit key event corresponding to our synthetic
+      // event when the deferred action runs; it must use the supplied event.
+      await pending?.value
+      #expect(log.flags == [[.command]])
+    }
+
+    @Test("Another key press cancels shortcut selection")
+    func anotherKeyPressCancelsShortcut() async throws {
+      let popup = AppState.shared.popup
+      popup.deferredSelection.sleepForTesting = {}
+      defer {
+        popup.reset()
+        popup.deferredSelection.sleepForTesting = nil
+      }
+      _ = history.added(historyItem("shortcut item"))
+      let log = SelectionLog()
+      #expect(popup.scheduleShortcutSelection(for: try shortcutEvent(flags: .command)) { _, flags in
+        log.flags.append(flags)
+      })
+      let pending = popup.deferredSelection.pendingTaskForTesting
+      popup.beginKeyPress()
+      await pending?.value
+      #expect(log.flags.isEmpty)
+      #expect(!popup.deferredSelection.isPending)
+    }
+
+    @Test("History.select cancels pending shortcut selection")
+    func historySelectionCancelsShortcut() async {
+      let popup = AppState.shared.popup
+      popup.deferredSelection.sleepForTesting = {}
+      let savedPaste = Defaults[.pasteByDefault]
+      Defaults[.pasteByDefault] = false
+      defer {
+        Defaults[.pasteByDefault] = savedPaste
+        popup.reset()
+        popup.deferredSelection.sleepForTesting = nil
+      }
+      let item = history.added(historyItem("selected directly"))
+      let log = SelectionLog()
+      popup.deferredSelection.schedule(flags: .command) { log.flags.append($0) }
+      let pending = popup.deferredSelection.pendingTaskForTesting
+      history.select(item, flags: .command)
+      await pending?.value
+      #expect(log.flags.isEmpty)
+      #expect(!popup.deferredSelection.isPending)
     }
 
     @Test("Default is empty")

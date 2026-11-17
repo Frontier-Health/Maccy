@@ -24,6 +24,10 @@ final class DeferredSelection {
   static let delay: Duration = .milliseconds(50)
 
   private var task: Task<Void, Never>?
+  #if DEBUG
+  var pendingTaskForTesting: Task<Void, Never>? { task }
+  var sleepForTesting: (@MainActor () async -> Void)?
+  #endif
 
   var isPending: Bool { task != nil }
 
@@ -34,7 +38,15 @@ final class DeferredSelection {
   ) {
     cancel()
     task = Task { [weak self] in
+      #if DEBUG
+      if let sleep = self?.sleepForTesting {
+        await sleep()
+      } else {
+        try? await Task.sleep(for: delay)
+      }
+      #else
       try? await Task.sleep(for: delay)
+      #endif
       guard !Task.isCancelled else { return }
 
       self?.task = nil
@@ -116,6 +128,27 @@ class Popup {
     AppState.shared.appDelegate?.panel.open(height: height, at: popupPosition)
   }
 
+  func beginKeyPress() {
+    deferredSelection.cancel()
+  }
+
+  @discardableResult
+  func scheduleShortcutSelection(
+    for event: NSEvent,
+    perform action: @escaping @MainActor (HistoryItemDecorator, NSEvent.ModifierFlags) -> Void = {
+      History.shared.select($0, flags: $1)
+    }
+  ) -> Bool {
+    guard let item = History.shared.shortcutItem(for: event) else { return false }
+    AppState.shared.navigator.select(item: item)
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+      .subtracting([.capsLock, .numericPad, .function])
+    deferredSelection.schedule(flags: flags) { flags in
+      action(item, flags)
+    }
+    return true
+  }
+
   func reset() {
     deferredSelection.cancel()
     state = .toggle
@@ -183,6 +216,7 @@ class Popup {
   }
 
   private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
+    beginKeyPress()
     if isHotKeyCode(Int(event.keyCode)) {
       if let item = History.shared.pressedShortcutItem {
         AppState.shared.navigator.select(item: item)

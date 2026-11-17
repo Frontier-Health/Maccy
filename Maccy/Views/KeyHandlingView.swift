@@ -14,7 +14,7 @@ struct KeyHandlingView<Content: View>: View {
       .onKeyPress { _ in
         // Any other key press is a new action: a selection still waiting for
         // an earlier shortcut key is dropped.
-        appState.popup.deferredSelection.cancel()
+        appState.popup.beginKeyPress()
 
         guard !appState.isEditingItem else { return .ignored }
 
@@ -166,12 +166,7 @@ struct KeyHandlingView<Content: View>: View {
           ()
         }
 
-        if let item = appState.history.pressedShortcutItem {
-          appState.navigator.select(item: item)
-          // The modifier keys now, not when the selection runs.
-          appState.popup.deferredSelection.schedule(flags: .currentModifierFlags) { flags in
-            appState.history.select(item, flags: flags)
-          }
+        if let event = NSApp.currentEvent, appState.popup.scheduleShortcutSelection(for: event) {
           return .handled
         }
 

@@ -414,6 +414,8 @@ extension SharedStateTests {
     private func resetTestSeams() {
       clipboard.sourceBundleIdentifierForTesting = nil
       clipboard.afterInspectionForTesting = nil
+      clipboard.beforeItemReadForTesting = nil
+      clipboard.beforeSkipSyncForTesting = nil
     }
 
     // Makes `copyReplacement` happen once, after the watcher has read the
@@ -469,6 +471,57 @@ extension SharedStateTests {
       replaceCopyWhileReading { [self] in copyString("second copy", types: [.string, .concealed]) }
       #expect(checkNow().isEmpty)
       #expect(checkNow().isEmpty)
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("A concealed secret replacing an ordinary copy between checks and reads is never stored",
+          arguments: [false, true])
+    func concealedReplacementBetweenReads(skipNext: Bool) {
+      let savedClient = Notifier.client
+      let client = RecordingNotificationClient()
+      Notifier.client = client
+      defer {
+        resetTestSeams()
+        clipboard.clearHooks()
+        Notifier.client = savedClient
+      }
+      History.shared.clearAll()
+      setCaptureMode(skipNext ? .skipNext : .capturing)
+      copyString("ordinary copy")
+      clipboard.beforeItemReadForTesting = { [self] in
+        clipboard.beforeItemReadForTesting = nil
+        copyString("SECRET between reads", types: [.string, .concealed])
+      }
+      var recorded: [HistoryItem] = []
+      clipboard.onNewCopy {
+        recorded.append($0)
+        History.shared.add($0)
+      }
+      clipboard.checkForChangesInPasteboard()
+      #expect(recorded.isEmpty)
+      #expect(History.shared.items.isEmpty)
+      #expect(storedCaptureMode == (skipNext ? .skipNext : .capturing))
+      clipboard.checkForChangesInPasteboard()
+      #expect(recorded.isEmpty)
+      #expect(History.shared.items.isEmpty)
+      #expect(storedCaptureMode == (skipNext ? .skipNext : .capturing))
+      client.resolvePermissions()
+      #expect(client.added.isEmpty)
+    }
+
+    @Test("A copy arriving after comparison but before skip sync is recorded exactly once next poll")
+    func replacementDuringSkipSyncIsNotMarkedSeen() {
+      defer { resetTestSeams() }
+      setCaptureMode(.skipNext)
+      copyString("copy to skip")
+      clipboard.beforeSkipSyncForTesting = { [self] in
+        clipboard.beforeSkipSyncForTesting = nil
+        copyString("newer copy")
+      }
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .capturing)
+      #expect(clipboard.changeCount != pasteboard.changeCount)
+      #expect(recordedStrings(checkNow()) == ["newer copy"])
       #expect(checkNow().isEmpty)
     }
 

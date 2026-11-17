@@ -14,6 +14,8 @@ class Clipboard {
   // for a change made while it was read, and before the copy is skipped or
   // recorded, so tests can change settings or the pasteboard at that point.
   var afterInspectionForTesting: (() -> Void)?
+  var beforeItemReadForTesting: (() -> Void)?
+  var beforeSkipSyncForTesting: (() -> Void)?
   // Stands in for the frontmost application's bundle identifier.
   var sourceBundleIdentifierForTesting: (() -> String?)?
   #endif
@@ -252,6 +254,9 @@ class Clipboard {
     // and PDF that bookmarks and cross-references add
     // (https://github.com/p0deje/Maccy/issues/613,
     // https://github.com/p0deje/Maccy/issues/770).
+    #if DEBUG
+    beforeItemReadForTesting?()
+    #endif
     let items = pasteboard.pasteboardItems ?? []
     let copy = PasteboardCopyRead.read(items, storing: allowList)
     // Ignore rules read the text of the string, file URL, RTF and HTML
@@ -314,6 +319,9 @@ class Clipboard {
         CaptureMode.consumeSkip(in: capturePreferences)
         // The watcher's own write is not an uncertain transition, so the copy
         // after the skipped one is recorded.
+        #if DEBUG
+        beforeSkipSyncForTesting?()
+        #endif
         syncCaptureState()
         // A copy made since the check above is not this one: leave it for the
         // next check instead of marking it as seen.

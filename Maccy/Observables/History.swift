@@ -53,10 +53,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   }
 
   var pressedShortcutItem: HistoryItemDecorator? {
-    guard let event = NSApp.currentEvent else {
-      return nil
-    }
+    NSApp.currentEvent.flatMap { shortcutItem(for: $0) }
+  }
 
+  func shortcutItem(for event: NSEvent) -> HistoryItemDecorator? {
     let modifierFlags = event.modifierFlags
       .intersection(.deviceIndependentFlagsMask)
       .subtracting(.capsLock)

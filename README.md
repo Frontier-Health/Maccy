@@ -88,9 +88,9 @@ If a configuration profile manages `captureMode`, or sets `ignoreEvents` or `ign
 
 In Settings › Ignore you can list applications whose copies Maccy ignores, or turn on "Ignore all applications except listed" so that only the listed ones are recorded. With that option on, a copy is not recorded when Maccy can't tell which application it came from (no frontmost application, or one without a bundle identifier).
 
-This is best-effort, not a guarantee. Maccy identifies the source as the application in front when it notices the copy, which happens up to one check interval (0.5 seconds by default) after the copy. That can be the wrong application for background apps, scripts, and copies made just before switching apps. Do not rely on it alone to keep secrets out of the history. Use the ignore patterns in Settings › Ignore and pause capture (see above) as well.
+This is best-effort, not a guarantee. Maccy identifies the source as the application in front when it notices the copy, which happens up to one check interval (0.5 seconds by default) after the copy. That can be the wrong application for background apps, scripts, and copies made just before switching apps. Copies arriving from another device through Universal Clipboard are attributed to whichever app is in front on this Mac. Do not rely on it alone to keep secrets out of the history. Use the ignore patterns in Settings › Ignore and pause capture (see above) as well.
 
-Maccy does not use the `org.nspasteboard.source` pasteboard type to find the source application. It writes that type on its own copies (copying from history, and the search query or OCR text copied from Maccy) and reads it only to recognise those. It is not stored from copies made by other applications.
+Maccy does not use the `org.nspasteboard.source` pasteboard type to find the source application. It writes that type on its own copies (copying from history, and the search query or OCR text copied from Maccy) and compares its bounded snapshot bytes on the skip-next path to recognise Maccy’s own search-query/OCR copies. It never identifies the source application or admits a copy. It is outside the storage allow-list and is not stored from other applications’ copies.
 
 ### Ignore Custom Copy Types
 

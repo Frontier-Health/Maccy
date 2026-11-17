@@ -48,8 +48,11 @@ jobs:
       # Hosted runners have no signing identity for the project's team, so
       # sign ad hoc with no team. Only the unit-test target runs: MaccyUITests
       # drive the real status item through the accessibility API, which needs
-      # a granted accessibility permission and a logged-in GUI session that
-      # hosted runners do not provide.
+      # a granted accessibility permission and a GUI session that hosted
+      # runners do not provide. Verified on a hosted macos-26 runner: every UI
+      # test fails with "Maccy has no status item exposed via accessibility" /
+      # "Maccy did not pop up", and the test plan's retryOnFailure (3x) made the
+      # run exceed 20 minutes before it was cancelled.
       - name: Build and test
         run: |
           set -o pipefail

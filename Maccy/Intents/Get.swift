@@ -41,6 +41,8 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
   }
 
   func perform() async throws -> some IntentResult & ReturnsValue<HistoryItemAppEntity> {
+    try await MainActor.run { try HistoryIntentAccess.requireEnabled() }
+    try await HistoryIntentAccess.waitUntilReady()
     let (contents, imageURL) = try await Self.read(selected: selected, number: number)
 
     let intentItem = HistoryItemAppEntity()
@@ -68,8 +70,9 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
   @MainActor
   private static func read(selected: Bool, number: Int) async throws -> (GetItemContents, URL?) {
     try HistoryIntentAccess.requireEnabled()
-    // History reflects the current storage policy before anything is read.
+    // History reflects the current storage policy and expiry before anything is read.
     AppState.shared.history.enforceStoragePolicy()
+    AppState.shared.history.runExpiryIfDue()
     var item: HistoryItem?
     if selected {
       item = AppState.shared.navigator.selection.first?.item

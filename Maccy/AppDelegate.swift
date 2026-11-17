@@ -54,8 +54,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // text in them) can no longer be matched to items, so drop them before capture starts.
     Notifier.removeAllDelivered()
 
-    Clipboard.shared.onNewCopy { History.shared.add($0) }
-    Clipboard.shared.start()
+    // The popup hotkey works only once launch maintenance has finished (see LaunchSequence).
+    KeyboardShortcuts.disable(.popup)
 
     Task {
       for await _ in Defaults.updates(.clipboardCheckInterval, initial: false) {
@@ -110,23 +110,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationDidFinishLaunching(_ aNotification: Notification) {
-    migrateUserDefaults()
-    disableUnusedGlobalHotkeys()
-
-    panel = FloatingPanel(
-      contentRect: NSRect(origin: .zero, size: Defaults[.windowSize]),
-      identifier: AppIdentity.bundleIdentifier,
-      statusBarButton: statusItem.button,
-      onClose: { AppState.shared.popup.reset() }
-    ) {
-      ContentView()
+    _ = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        self?.sessionEnding = true
+      }
     }
 
-    // After the storage policy is applied (in migrateUserDefaults): clear on
-    // quit (if a crash or force quit skipped it), expiry and the size limit
-    // run once now, and expiry keeps running while Maccy is open.
-    History.shared.performLaunchMaintenance()
-    History.shared.startExpirySchedule()
+    // Nothing reads or shows history, and no alert is shown, until the
+    // storage policy and launch maintenance have run; see LaunchSequence.
+    LaunchSequence { [self] step in
+      switch step {
+      case .applyStoragePolicy:
+        History.shared.beginLaunch()
+        migrateUserDefaults()
+      case .maintain:
+        History.shared.performLaunchMaintenance()
+      case .loadHistory:
+        History.shared.finishLaunch()
+      case .createInterface:
+        disableUnusedGlobalHotkeys()
+        panel = FloatingPanel(
+          contentRect: NSRect(origin: .zero, size: Defaults[.windowSize]),
+          identifier: AppIdentity.bundleIdentifier,
+          statusBarButton: statusItem.button,
+          onClose: { AppState.shared.popup.reset() }
+        ) {
+          ContentView()
+        }
+        KeyboardShortcuts.enable(.popup)
+      case .startCapture:
+        Clipboard.shared.onNewCopy { History.shared.add($0) }
+        Clipboard.shared.start()
+      case .startMaintenanceSchedule:
+        History.shared.startExpirySchedule()
+      case .presentFailures:
+        History.shared.presentDeferredFailures()
+      }
+    }.run()
 
     // With text recognition off, titles recognised earlier are erased, now
     // and whenever the effective value changes.
@@ -139,17 +161,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    guard History.shared.isReady else { return false }
     panel.toggle(height: AppState.shared.popup.height)
     return true
   }
 
-  func applicationWillTerminate(_ notification: Notification) {
-    if Defaults[.clearOnQuit] {
-      // A failure is shown before Maccy quits, and the clear runs again at
-      // the next launch.
-      AppState.shared.history.clearOnQuit()
+  // Set when the session is ending (log out, restart, shut down): quitting
+  // must not wait for a dialog then.
+  private var sessionEnding = false
+
+  // "Clear history on quit" runs here, where quitting can still be cancelled.
+  // See QuitClearDecision. Terminations that never ask (a forced quit, a
+  // crash, or a session ending while Maccy doesn't respond) skip this; the
+  // clear at the next launch is the safety net.
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    if isSessionEndingQuit() {
+      sessionEnding = true
     }
-    AppState.shared.history.compactIfExpiryRemovedItems()
+    return QuitClearDecision.reply(
+      clearOnQuit: Defaults[.clearOnQuit],
+      sessionEnding: sessionEnding,
+      clear: { History.shared.clearOnQuit(alerting: false) },
+      quitAnyway: {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = QuitClearDecision.title
+        alert.informativeText = QuitClearDecision.message
+        alert.addButton(withTitle: QuitClearDecision.quitAnywayButton)
+        alert.addButton(withTitle: QuitClearDecision.cancelButton)
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
+      }
+    )
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    // A compaction still pending gets a short time; if it can't finish it
+    // runs at the next launch.
+    History.shared.compactBeforeQuit(timeLimit: sessionEnding ? 1 : 5)
+  }
+
+  // Whether the quit request comes from logging out, restarting or shutting
+  // down.
+  private func isSessionEndingQuit() -> Bool {
+    guard let event = NSAppleEventManager.shared().currentAppleEvent,
+          event.eventClass == AEEventClass(kCoreEventClass),
+          event.eventID == AEEventID(kAEQuitApplication),
+          let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue else {
+      return false
+    }
+    let sessionEndingReasons = [
+      OSType(kAELogOut), OSType(kAEReallyLogOut), OSType(kAEShowRestartDialog),
+      OSType(kAEShowShutdownDialog), OSType(kAERestart), OSType(kAEShutDown)
+    ]
+    return sessionEndingReasons.contains(reason)
   }
 
   private func ensureMigration(key: String, _ action: () -> Void) {
@@ -196,7 +261,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Representations the storage allow-list doesn't cover, including the web
     // archives this used to remove, are deleted on every launch while the
     // setting is valid. A failed clean-up is retried here on the next launch.
-    History.shared.enforceStoragePolicy()
+    // The list is built later, after launch maintenance.
+    History.shared.enforceStoragePolicy(reloadingItems: false)
 
     // The following defaults are not used in Maccy 2.x
     // and should be removed in 3.x.
@@ -218,6 +284,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       return
     }
 
+    guard History.shared.isReady else { return }
     panel.toggle(height: AppState.shared.popup.height, at: .statusItem)
   }
 

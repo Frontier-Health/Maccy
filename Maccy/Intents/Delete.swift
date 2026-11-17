@@ -16,6 +16,8 @@ struct Delete: AppIntent, CustomIntentMigratedAppIntent {
   }
 
   func perform() async throws -> some IntentResult {
+    try await MainActor.run { try HistoryIntentAccess.requireEnabled() }
+    try await HistoryIntentAccess.waitUntilReady()
     try await MainActor.run {
       try HistoryIntentAccess.requireEnabled()
       let item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items)

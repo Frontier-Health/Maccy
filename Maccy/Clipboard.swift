@@ -10,8 +10,9 @@ class Clipboard {
 
   private var onNewCopyHooks: [OnNewCopyHook] = []
   #if DEBUG
-  // Runs after the pasteboard is inspected and before the copy is skipped or
-  // recorded, so tests can change settings at that point.
+  // Runs after the pasteboard is inspected and before the pasteboard is checked
+  // for a change made while it was read, and before the copy is skipped or
+  // recorded, so tests can change settings or the pasteboard at that point.
   var afterInspectionForTesting: (() -> Void)?
   // Stands in for the frontmost application's bundle identifier.
   var sourceBundleIdentifierForTesting: (() -> String?)?
@@ -199,11 +200,13 @@ class Clipboard {
     let previousCaptureMode = lastCheckedCaptureMode
     lastCheckedCaptureMode = captureMode
 
-    guard pasteboard.changeCount != changeCount else {
+    // Read once: this is the copy the rest of this check works on.
+    let observedChangeCount = pasteboard.changeCount
+    guard observedChangeCount != changeCount else {
       return
     }
 
-    changeCount = pasteboard.changeCount
+    changeCount = observedChangeCount
 
     let isFromMaccy = pasteboard.pasteboardItems?.contains(where: { $0.types.contains(.fromMaccy) }) == true
     if !isFromMaccy {
@@ -232,7 +235,8 @@ class Clipboard {
       return
     }
 
-    if shouldIgnore(sourceBundleIdentifier) {
+    let sourceAppBundle = sourceBundleIdentifier
+    if shouldIgnore(sourceAppBundle) {
       return
     }
 
@@ -315,9 +319,22 @@ class Clipboard {
       return
     }
 
+    let isMaccySource = captureMode == .skipNext &&
+      pasteboard.string(forType: .source) == NSPasteboard.PasteboardType.fromMaccy.rawValue
+
     #if DEBUG
     afterInspectionForTesting?()
     #endif
+
+    // Everything above was read from the pasteboard over a span of time. If
+    // another copy replaced it meanwhile, the checks and the data may come from
+    // different copies, so none of it is used. `changeCount` still holds the
+    // value this check started from, so the next check sees the newer copy as
+    // a change and handles it on its own; skip next is not used up.
+    guard pasteboard.changeCount == observedChangeCount else {
+      logger.info("Copy not recorded: the pasteboard changed while it was being read")
+      return
+    }
 
     if captureMode == .skipNext {
       // This copy would have been recorded, so it is the one to skip. Maccy's
@@ -325,7 +342,6 @@ class Clipboard {
       // the pasteboard was inspected, so whether the copy would be recorded
       // is decided again with the setting read now: a copy `add` would refuse
       // doesn't use up the skip.
-      let isMaccySource = pasteboard.string(forType: .source) == NSPasteboard.PasteboardType.fromMaccy.rawValue
       guard let currentAllowList = StoragePolicy.current.allowList,
             currentAllowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
         return
@@ -335,6 +351,9 @@ class Clipboard {
         // The watcher's own write is not an uncertain transition, so the copy
         // after the skipped one is recorded.
         syncCaptureState()
+        // A copy made since the check above is not this one: leave it for the
+        // next check instead of marking it as seen.
+        changeCount = observedChangeCount
       }
 
       return
@@ -350,7 +369,7 @@ class Clipboard {
       }
     }
 
-    historyItem.application = sourceBundleIdentifier
+    historyItem.application = sourceAppBundle
     historyItem.regenerateTitle()
 
     onNewCopyHooks.forEach({ $0(historyItem) })

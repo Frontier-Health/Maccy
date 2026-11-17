@@ -43,6 +43,7 @@ extension SharedStateTests {
 
     deinit {
       clipboard.sourceBundleIdentifierForTesting = nil
+      clipboard.afterInspectionForTesting = nil
       Defaults[.enabledPasteboardTypes] = savedEnabledTypes
       savedCaptureSettings.restore()
       Defaults[.ignoreRegexp] = savedIgnoreRegexp
@@ -404,6 +405,66 @@ extension SharedStateTests {
       clipboard.sourceBundleIdentifierForTesting = { "com.example.blocked" }
       copyString("from a blocked app")
       #expect(checkNow().isEmpty)
+    }
+
+    // Makes `copyReplacement` happen once, after the watcher has read the
+    // pasteboard and before it decides what to do with it.
+    private func replaceCopyWhileReading(_ copyReplacement: @escaping () -> Void) {
+      clipboard.afterInspectionForTesting = { [clipboard] in
+        clipboard.afterInspectionForTesting = nil
+        copyReplacement()
+      }
+    }
+
+    private func recordedStrings(_ items: [HistoryItem]) -> [String] {
+      items.flatMap(\.contents).compactMap { content in
+        content.type == NSPasteboard.PasteboardType.string.rawValue ? content.value.flatMap {
+          String(data: $0, encoding: .utf8)
+        } : nil
+      }
+    }
+
+    @Test("A copy replaced while it is being read records nothing; the next check records the new copy once")
+    func copyReplacedWhileReadingIsDiscarded() {
+      copyString("first copy")
+      replaceCopyWhileReading { [self] in copyString("second copy") }
+      #expect(checkNow().isEmpty)
+
+      let recorded = checkNow()
+      #expect(recordedStrings(recorded) == ["second copy"])
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("A copy replaced while it is being read does not use up skip next")
+    func copyReplacedWhileReadingKeepsSkipNext() {
+      setCaptureMode(.skipNext)
+      copyString("first copy")
+      replaceCopyWhileReading { [self] in copyString("second copy") }
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .skipNext)
+
+      // The replacement is an ordinary copy now, so it is the one skipped.
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .capturing)
+
+      copyString("third copy")
+      #expect(recordedStrings(checkNow()) == ["third copy"])
+    }
+
+    @Test("A replacement that the filters reject is not recorded under the first copy's checks")
+    func replacementIsFilteredOnItsOwn() {
+      copyString("first copy")
+      replaceCopyWhileReading { [self] in copyString("second copy", types: [.string, .concealed]) }
+      #expect(checkNow().isEmpty)
+      #expect(checkNow().isEmpty)
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("A copy that is not replaced while it is being read is recorded as before")
+    func unchangedCopyIsRecorded() {
+      copyString("only copy")
+      clipboard.afterInspectionForTesting = {}
+      #expect(recordedStrings(checkNow()) == ["only copy"])
     }
 
     @Test("Ignore transient types")

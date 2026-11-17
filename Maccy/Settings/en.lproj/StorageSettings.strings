@@ -25,11 +25,11 @@
 "ExpiryUnit" = "hours (0 = never)";
 "ExpiryOff" = "Items are kept until you delete them or the history size is reached. Set a number of hours to remove items you have not copied for that long (copying an item from Maccy counts). Pinned items are kept.";
 "ExpiryOffManaged" = "Your administrator has turned automatic removal off.";
-"ExpiryOn" = "Items you have not copied for %lld hours are removed (copying an item from Maccy counts). Pinned items are kept. Checked at launch, every few minutes and before history is shown.";
-"ExpiryOnManaged" = "Set by your administrator: items not copied for %lld hours are removed, including pinned items. Checked at launch, every few minutes and before history is shown.";
+"ExpiryOn" = "Items you have not copied for %lld hours are removed (copying an item from Maccy counts). Pinned items are kept. Checked at launch, every few minutes and before history is shown. If the Mac's clock is set back by more than 10 minutes twice, a recently copied item can be removed early.";
+"ExpiryOnManaged" = "Set by your administrator: items not copied for %lld hours are removed, including pinned items. Checked at launch, every few minutes and before history is shown. If the Mac's clock is set back by more than 10 minutes twice, a recently copied item can be removed early.";
 "ExpiryInvalid" = "The saved expiry value is invalid. Until it is fixed, Maccy removes items not copied for %lld hour. Pinned items are kept. Enter a number of hours, or 0 to turn this off.";
 "ExpiryInvalidManaged" = "The expiry value in your configuration profile is invalid (it must be 0 or a positive number of hours). Until your administrator fixes it, Maccy removes items not copied for %lld hour, including pinned items.";
-"CompactionNote" = "After clearing history or removing expired items, Maccy asks its database to compact, in the background. This is not secure erasure: copies can remain on the disk, in APFS snapshots, in Time Machine and in other backups.";
+"CompactionNote" = "After history is cleared or items are removed, Maccy rebuilds its database in the background so the deleted data is dropped from it: straight after clearing, otherwise at most once an hour and when Maccy quits or opens. This is not secure erasure: copies can remain on the disk, in APFS snapshots, in Time Machine and in other backups.";
 "RemovalFailedDeleteTitle" = "The item was NOT deleted";
 "RemovalFailedClearTitle" = "History was NOT cleared";
 "RemovalFailedTrimTitle" = "Old items were NOT removed";
@@ -51,7 +51,8 @@
 "ExportRemovalFailedTitle" = "An exported image file was NOT deleted";
 "LoadFailedTitle" = "History could not be loaded";
 "ExportRemovalFailedMessage" = "History was deleted, but an image file Maccy exported for Shortcuts could not be removed and can still be read on this Mac. Maccy will keep trying to delete it.";
-"LoadFailedMessage" = "Maccy could not read its history database, so history is not shown. Stored items have not been removed. Maccy will try again when you open it. If this keeps happening, quit and reopen Maccy.";
+"LoadFailedMessage" = "Maccy could not read its history database, so history is not shown and new copies are not saved. Stored items have not been removed. Maccy tries again every few minutes and when you open it. If this keeps happening, quit and reopen Maccy.";
+"LoadRetry" = "Try Again";
 "SeveralFailuresTitle" = "Maccy could not finish its history upkeep";
 "QuitClearFailedTitle" = "History was NOT cleared";
 "QuitClearFailedMessage" = "Maccy could not delete history from its database, so every item is still stored. If you quit anyway, Maccy tries again the next time it opens. Cancel keeps Maccy open so you can try again.";

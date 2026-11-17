@@ -114,7 +114,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
     ) { [weak self] _ in
       MainActor.assumeIsolated {
-        self?.sessionEnding = true
+        self?.sessionEnd.noticePowerOff()
+      }
+    }
+    _ = NotificationCenter.default.addObserver(
+      forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        self?.sessionEnd.sessionContinues()
       }
     }
 
@@ -141,8 +148,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         KeyboardShortcuts.enable(.popup)
       case .startCapture:
-        Clipboard.shared.onNewCopy { History.shared.add($0) }
-        Clipboard.shared.start()
+        // After a compaction left pending by the last session, so that copies
+        // can't keep interrupting it.
+        History.shared.afterLaunchCompaction {
+          Clipboard.shared.onNewCopy { History.shared.add($0) }
+          Clipboard.shared.start()
+        }
       case .startMaintenanceSchedule:
         History.shared.startExpirySchedule()
       case .presentFailures:
@@ -152,24 +163,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-    guard History.shared.isReady else { return false }
+    guard History.shared.isLaunched else { return false }
     panel.toggle(height: AppState.shared.popup.height)
     return true
   }
 
-  // Set when the session is ending (log out, restart, shut down): quitting
-  // must not wait for a dialog then.
-  private var sessionEnding = false
+  // Whether the session is ending (log out, restart, shut down): quitting
+  // must not wait for a dialog then. See SessionEndState.
+  private var sessionEnd = SessionEndState()
+  // Whether the quit under way is a session end, for the time it gets.
+  private var quittingForSessionEnd = false
 
   // "Clear history on quit" runs here, where quitting can still be cancelled.
   // See QuitClearDecision. Terminations that never ask (a forced quit, a
   // crash, or a session ending while Maccy doesn't respond) skip this; the
   // clear at the next launch is the safety net.
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    if isSessionEndingQuit() {
-      sessionEnding = true
-    }
-    return QuitClearDecision.reply(
+    let sessionEnding = sessionEnd.isSessionEnding(quitRequest())
+    let reply = QuitClearDecision.reply(
       clearOnQuit: Defaults[.clearOnQuit],
       sessionEnding: sessionEnding,
       clear: { History.shared.clearOnQuit(alerting: false) },
@@ -184,28 +195,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertFirstButtonReturn
       }
     )
+    sessionEnd.quitAnswered(reply)
+    quittingForSessionEnd = sessionEnding && reply != .terminateCancel
+    return reply
   }
 
   func applicationWillTerminate(_ notification: Notification) {
     // A compaction still pending gets a short time; if it can't finish it
     // runs at the next launch.
-    History.shared.compactBeforeQuit(timeLimit: sessionEnding ? 1 : 5)
+    History.shared.compactBeforeQuit(timeLimit: quittingForSessionEnd ? 1 : 5)
   }
 
-  // Whether the quit request comes from logging out, restarting or shutting
-  // down.
-  private func isSessionEndingQuit() -> Bool {
+  // Where the quit request comes from: a quit Apple event (and whether its
+  // reason is logging out, restarting or shutting down), or Maccy itself.
+  private func quitRequest() -> SessionEndState.QuitRequest {
     guard let event = NSAppleEventManager.shared().currentAppleEvent,
           event.eventClass == AEEventClass(kCoreEventClass),
-          event.eventID == AEEventID(kAEQuitApplication),
-          let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue else {
-      return false
+          event.eventID == AEEventID(kAEQuitApplication) else {
+      return .inApp
+    }
+    guard let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue else {
+      return .appleEvent(sessionEnding: false)
     }
     let sessionEndingReasons = [
       OSType(kAELogOut), OSType(kAEReallyLogOut), OSType(kAEShowRestartDialog),
       OSType(kAEShowShutdownDialog), OSType(kAERestart), OSType(kAEShutDown)
     ]
-    return sessionEndingReasons.contains(reason)
+    return .appleEvent(sessionEnding: sessionEndingReasons.contains(reason))
   }
 
   private func ensureMigration(key: String, _ action: () -> Void) {
@@ -275,7 +291,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       return
     }
 
-    guard History.shared.isReady else { return }
+    guard History.shared.isLaunched else { return }
     panel.toggle(height: AppState.shared.popup.height, at: .statusItem)
   }
 

@@ -37,6 +37,7 @@ extension SharedStateTests {
       Storage.shared.saveFailureForTesting = nil
       clipboard.afterInspectionForTesting = nil
       History.shared.storageSettingChanged()
+      UniversalClipboardFile.resetAccessDeniedForTesting()
     }
 
     deinit {
@@ -50,6 +51,7 @@ extension SharedStateTests {
       UniversalClipboardFile.allowedDirectoriesForTesting = nil
       UniversalClipboardFile.maximumBytesForTesting = nil
       UniversalClipboardFile.readObserverForTesting = nil
+      UniversalClipboardFile.resetAccessDeniedForTesting()
       ContentLimits.maximumRepresentationBytesForTesting = nil
       ContentLimits.maximumCopyBytesForTesting = nil
       ContentLimits.maximumImagePixelsForTesting = nil
@@ -970,6 +972,43 @@ extension SharedStateTests {
       pasteboard.writeObjects([NSPasteboardItem().withString("meeting notes"), clean])
       let recorded = try #require(checkNow().first)
       #expect(stringValues(recorded) == ["meeting notes"])
+    }
+
+    @Test("A denied Universal Clipboard read shows a neutral placeholder, is logged once and not retried")
+    func deniedUniversalClipboardRead() async throws {
+      let files = FileManager.default
+      let staging = files.temporaryDirectory.appending(path: "a7-uc-denied-\(UUID().uuidString)")
+      try files.createDirectory(at: staging, withIntermediateDirectories: true)
+      defer {
+        try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.appending(path: "a.jpeg").path)
+        try? files.removeItem(at: staging)
+      }
+      UniversalClipboardFile.allowedDirectoriesForTesting = [staging.path]
+      // A file this user may not open stands in for the sandbox's refusal.
+      let denied = staging.appending(path: "a.jpeg")
+      try jpegData().write(to: denied)
+      try files.setAttributes([.posixPermissions: 0o000], ofItemAtPath: denied.path)
+      let readable = staging.appending(path: "b.jpeg")
+      try jpegData().write(to: readable)
+
+      let reads = ThreadRecorder()
+      UniversalClipboardFile.readObserverForTesting = { reads.record($0) }
+      let item = universalClipboardItem(denied)
+      #expect(await item.decodedImage(for: .preview) == nil)
+      #expect(item.universalClipboardImageIsUnavailable)
+      #expect(HistoryItemDecorator(item).isUniversalClipboardImage)
+      #expect(UniversalClipboardFile.accessWasDenied)
+      #expect(UniversalClipboardFile.accessDeniedLogsForTesting == 1)
+      #expect(reads.values.count == 1)
+      #expect(PreviewItemView.universalClipboardUnavailableNote == "Image from another device is not available")
+
+      // Asking again, for this item or another, touches no file and logs nothing more.
+      #expect(await item.decodedImage(for: .preview) == nil)
+      let other = universalClipboardItem(readable)
+      #expect(await other.decodedImage(for: .thumbnail) == nil)
+      #expect(other.universalClipboardImageIsUnavailable)
+      #expect(reads.values.count == 1)
+      #expect(UniversalClipboardFile.accessDeniedLogsForTesting == 1)
     }
 
     // MARK: Second review round: when "too large" is announced

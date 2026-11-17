@@ -3,7 +3,15 @@
 "Files" = "Files";
 "Images" = "Images";
 "Text" = "Text";
-"SaveDescription" = "Change what types of copied content should be stored.";
+"SaveDescription" = "Change what types of copied content are saved. Turning a type off removes that data from existing history, including pinned items, and turning it back on does not restore it. Other data apps put on the clipboard is never saved.";
+"InvalidSaveTypes" = "The saved list of content types is invalid. Until it is fixed, Maccy is not saving new copies and is not removing stored data to match this setting: turn on the types to save. Aliases, pins and the clear actions still work.";
+"InvalidManagedSaveTypes" = "The list of content types in your configuration profile is invalid. Until your administrator fixes it, Maccy is not saving new copies and is not removing stored data to match this setting. Aliases, pins and the clear actions still work.";
+"ManagedSaveTypes" = "These settings are controlled by a configuration profile. Only your administrator can change them.";
+"RemoveStoredDataTitle" = "Remove this data from history?";
+"RemoveStoredDataMessage" = "%1$lld items in history will lose data and %2$lld items will be removed entirely, including pinned items. This cannot be undone.";
+"RemoveStoredDataMessageUncounted" = "Items in history may lose data or be removed entirely, including pinned items. This cannot be undone.";
+"RemoveStoredDataConfirm" = "Remove";
+"RemoveStoredDataCancel" = "Cancel";
 "Size" = "Size:";
 "SizeTooltip" = "Number of history items to keep.\nDefault: 200.";
 "CurrentSizeTooltip" = "Current size on disk.";

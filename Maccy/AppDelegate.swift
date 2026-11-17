@@ -30,7 +30,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private var isStatusItemDisabled: Bool {
-    Defaults[.ignoreEvents] || Defaults[.enabledPasteboardTypes].isEmpty
+    !CaptureMode.effective(in: Clipboard.shared.capturePreferences).capturesCopies ||
+      !StoragePolicy.current.storesAnything
   }
 
   private var statusItemVisibilityObserver: NSKeyValueObservation?
@@ -47,6 +48,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       UserDefaults.standard.removePersistentDomain(forName: Defaults.Keys.testingSuiteName)
     }
     #endif
+
+    // Must run before the clipboard starts watching, so the first copy is
+    // judged by the migrated mode.
+    CaptureMode.migrateLegacyDefaults(in: Defaults.Keys.captureMode.suite)
 
     // Bridge FloatingPanel via AppDelegate.
     AppState.shared.appDelegate = self
@@ -92,7 +97,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     updateStatusItemAccessibilityLabel()
 
     Task {
-      for await _ in Defaults.updates(.ignoreEvents) {
+      for await _ in Defaults.updates([.captureMode, .legacyIgnoreEvents, .legacyIgnoreOnlyNextEvent]) {
         statusItem.button?.appearsDisabled = isStatusItemDisabled
         updateStatusItemAccessibilityLabel()
       }
@@ -154,11 +159,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     ensureMigration(key: "2025-07-04-add-jpeg-heic") {
-      var types = Defaults[.enabledPasteboardTypes]
-      if !types.isDisjoint(with: StorageType.images.types) {
-        types.formUnion(StorageType.images.types)
+      // An invalid or profile-managed value is left as it is: rewriting it
+      // from the fallback would turn storage back on.
+      let policy = StoragePolicy.current
+      guard !policy.isForced, let allowList = policy.allowList,
+            !allowList.enabledTypes.isDisjoint(with: StorageType.images.types) else {
+        return
       }
-      Defaults[.enabledPasteboardTypes] = types
+      Defaults[.enabledPasteboardTypes] = allowList.enabledTypes.union(StorageType.images.types)
     }
 
     ensureMigration(key: "2026-08-12-cleanup-orphaned-history-item-contents") {
@@ -169,9 +177,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       _ = try? Storage.shared.sanitizeTitles()
     }
 
-    ensureMigration(key: "2026-09-15-remove-unpersistable-contents") {
-      _ = try? Storage.shared.removeUnpersistableContents()
-    }
+    // Representations the storage allow-list doesn't cover, including the web
+    // archives this used to remove, are deleted on every launch while the
+    // setting is valid. A failed clean-up is retried here on the next launch.
+    History.shared.enforceStoragePolicy()
 
     // The following defaults are not used in Maccy 2.x
     // and should be removed in 3.x.
@@ -188,13 +197,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       .union(NSEvent.modifierFlags)
       .intersection(.deviceIndependentFlagsMask)
 
-    if modifierFlags.contains(.option) {
-      Defaults[.ignoreEvents].toggle()
-
-      if modifierFlags.contains(.shift) {
-        Defaults[.ignoreOnlyNextEvent] = Defaults[.ignoreEvents]
-      }
-
+    if let request = CaptureModeRequest(statusItemClickWith: modifierFlags) {
+      Clipboard.shared.perform(request)
       return
     }
 

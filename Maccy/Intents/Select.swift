@@ -20,18 +20,27 @@ struct Select: AppIntent, CustomIntentMigratedAppIntent {
 
   func perform() async throws -> some IntentResult & ReturnsValue<String> {
     let value = try await MainActor.run { () -> String in
+      // Titles reflect the current storage policy before one is returned.
+      AppState.shared.history.enforceStoragePolicy()
       let items = AppState.shared.history.items
       let index = number - positionOffset
       guard items.count >= index else {
         throw AppIntentError.notFound
       }
 
-      let value = items[index].title
+      let value = Self.value(of: items[index])
       AppState.shared.history.select(items[index], flags: .currentModifierFlags)
 
       return value
     }
 
     return .result(value: value)
+  }
+
+  // What the intent returns for an item: its title that may be shown under
+  // the current storage policy.
+  @MainActor
+  static func value(of item: HistoryItemDecorator) -> String {
+    item.item.displayTitle
   }
 }

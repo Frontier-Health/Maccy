@@ -1,5 +1,35 @@
 import AppKit
+import Defaults
 import SwiftUI
+
+// Whether edited content may be saved: it is saved as plain text, so only
+// while the storage policy allows storing plain text. Follows the setting
+// while the editor is open, and is read again just before a save.
+@Observable
+final class TextEditPermission {
+  private(set) var isAllowed = TextEditPermission.textIsStorable
+
+  @ObservationIgnored
+  private var observer: Defaults.Observation?
+
+  init() {
+    observer = Defaults.observe(.enabledPasteboardTypes, options: []) { [weak self] _ in
+      self?.refresh()
+    }
+  }
+
+  isolated deinit {
+    observer?.invalidate()
+  }
+
+  func refresh() {
+    isAllowed = Self.textIsStorable
+  }
+
+  private static var textIsStorable: Bool {
+    StoragePolicy.current.allowList?.enabledTypes.contains(.string) == true
+  }
+}
 
 struct ItemEditorView: View {
   @Environment(AppState.self) private var appState
@@ -14,6 +44,10 @@ struct ItemEditorView: View {
   @State private var isTextContent: Bool
   @State private var isRichText: Bool
   @State private var isContentTooLarge: Bool
+  @State private var textPermission = TextEditPermission()
+  @State private var saveError: String?
+
+  private var isTextStorable: Bool { textPermission.isAllowed }
 
   private var hasWarning: Bool {
     isContentTooLarge || (isRichText && editableContent.hasChanges)
@@ -28,7 +62,7 @@ struct ItemEditorView: View {
 
   init(for item: HistoryItemDecorator) {
     self.item = item
-    self._editableTitle = State(initialValue: item.item.title)
+    self._editableTitle = State(initialValue: item.item.displayTitle)
     self._editableContent = State(initialValue: LargeTextView.EditorState(text: item.previewText.string))
     self._selectedPin = State(initialValue: item.item.pin)
 
@@ -40,6 +74,15 @@ struct ItemEditorView: View {
     )
     self._isRichText = State(
       initialValue: item.hasRichText && !item.hasImage && !item.hasFileURLs
+    )
+  }
+
+  private static var textNotStorableMessage: String {
+    NSLocalizedString(
+      "TextNotStorable",
+      tableName: "PinsSettings",
+      value: "Content can't be edited because Maccy is not saving text. Turn on Text in Storage settings to edit it.",
+      comment: ""
     )
   }
 
@@ -80,7 +123,21 @@ struct ItemEditorView: View {
           Text("Content", tableName: "PinsSettings")
             .font(.headline)
 
-          if hasWarning {
+          if let saveError {
+            Label {
+              Text(saveError)
+            } icon: {
+              Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            }
+          } else if !isTextStorable && (isTextContent || isRichText) {
+            Label {
+              Text(Self.textNotStorableMessage)
+            } icon: {
+              Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+            }
+          } else if hasWarning {
             Label {
               if isContentTooLarge {
                 Text(NSLocalizedString(
@@ -122,6 +179,11 @@ struct ItemEditorView: View {
       availablePins = appState.history.availablePins
       focusedField = item.hasImage ? .pin : .title
     }
+    .onChange(of: textPermission.isAllowed) { _, isAllowed in
+      if isAllowed {
+        saveError = nil
+      }
+    }
     .onExitCommand { dismiss() }
   }
 
@@ -147,11 +209,11 @@ struct ItemEditorView: View {
       if isTextContent || isRichText {
         LargeTextView(
           editorState: editableContent,
-          isEditable: !isContentTooLarge,
+          isEditable: !isContentTooLarge && isTextStorable,
           accessibilityLabel: NSLocalizedString("Content", tableName: "PinsSettings", comment: ""),
           onCancel: { dismiss() }
         )
-          .disabled(isContentTooLarge)
+          .disabled(isContentTooLarge || !isTextStorable)
           .padding(.horizontal, 8)
           .padding(.vertical, 6)
       } else {
@@ -182,44 +244,43 @@ struct ItemEditorView: View {
   }
 
   private var hasChangesToApply: Bool {
-    let titleChanged = !item.hasImage && editableTitle != item.item.title
+    let titleChanged = !item.hasImage && editableTitle != item.item.displayTitle
     let pinChanged = selectedPin != nil && selectedPin != item.item.pin
     let contentChanged = (isTextContent || isRichText) && editableContent.hasChanges
     return titleChanged || pinChanged || contentChanged
   }
 
-  private func applyChanges() {
-    if !item.hasImage && editableTitle != item.item.title {
-      item.item.title = editableTitle
-      item.title = editableTitle
+  // Applies every change, or none: a content edit the storage policy refuses
+  // leaves the title and pin unchanged too. Returns whether it was applied.
+  private func applyChanges() -> Bool {
+    textPermission.refresh()
+    if (isTextContent || isRichText) && editableContent.hasChanges {
+      guard textPermission.isAllowed,
+            let data = editableContent.text.data(using: .utf8),
+            item.item.replaceText(with: data, storing: StoragePolicy.current) else {
+        textPermission.refresh()
+        saveError = Self.textNotStorableMessage
+        return false
+      }
     }
+
+    if !item.hasImage && editableTitle != item.item.displayTitle {
+      // An empty alias goes back to a title made from the content.
+      item.item.setAlias(editableTitle)
+    }
+    item.refreshTitle()
 
     if let selectedPin {
       appState.history.updatePin(item.item, to: selectedPin)
     }
 
-    guard isTextContent || isRichText else { return }
-    guard editableContent.hasChanges,
-          let data = editableContent.text.data(using: .utf8) else { return }
-
-    let historyItem = item.item
-    let stringType = NSPasteboard.PasteboardType.string.rawValue
-    historyItem.contents.removeAll { $0.type != stringType }
-
-    if let index = historyItem.contents.firstIndex(where: {
-      $0.type == stringType
-    }) {
-      historyItem.contents[index].value = data
-    } else {
-      historyItem.contents.append(
-        HistoryItemContent(type: stringType, value: data)
-      )
-    }
+    return true
   }
 
   private func saveChanges() {
     guard hasChangesToApply else { return }
-    applyChanges()
+    // A refused save keeps the editor open and says why.
+    guard applyChanges() else { return }
     dismiss()
   }
 }

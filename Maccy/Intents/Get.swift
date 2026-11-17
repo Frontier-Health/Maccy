@@ -1,7 +1,7 @@
 import Foundation
 import AppIntents
 
-private nonisolated struct ItemContents: Sendable {
+nonisolated struct GetItemContents: Sendable, Equatable {
   let text: String?
   let html: Data?
   let file: URL?
@@ -40,7 +40,9 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
   }
 
   func perform() async throws -> some IntentResult & ReturnsValue<HistoryItemAppEntity> {
-    let contents = try await MainActor.run { () -> ItemContents in
+    let contents = try await MainActor.run { () -> GetItemContents in
+      // History reflects the current storage policy before anything is read.
+      AppState.shared.history.enforceStoragePolicy()
       var item: HistoryItem?
       if selected {
         item = AppState.shared.navigator.selection.first?.item
@@ -55,13 +57,7 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
         throw AppIntentError.notFound
       }
 
-      return ItemContents(
-        text: item.text,
-        html: item.htmlData,
-        file: item.fileURLs.first,
-        image: item.imageData,
-        rtf: item.rtfData
-      )
+      return Self.contents(of: item, readableBy: StoragePolicy.currentReadAllowList)
     }
 
     let intentItem = HistoryItemAppEntity()
@@ -86,5 +82,20 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
     }
 
     return .result(value: intentItem)
+  }
+
+  // What the intent hands out: only representations of exactly the types that
+  // may be read now, whatever an item stored under an earlier policy still
+  // holds. An image comes only from an allowed image type, never from another
+  // stored image format.
+  @MainActor
+  static func contents(of item: HistoryItem, readableBy allowList: StorageAllowList) -> GetItemContents {
+    GetItemContents(
+      text: item.text(readableBy: allowList),
+      html: item.htmlData(readableBy: allowList),
+      file: item.fileURLs(readableBy: allowList).first,
+      image: item.imageData(readableBy: allowList),
+      rtf: item.rtfData(readableBy: allowList)
+    )
   }
 }

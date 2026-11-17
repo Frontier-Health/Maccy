@@ -6,3 +6,4 @@
 "ParagraphsTooLongToEdit" = "Text contains paragraphs that are too long to edit.";
 "RichTextEditWarning" = "Editing will discard all formatting.";
 "PinCustomizationDescription" = "You can customize the hotkey, title, and content of any pinned item. To edit, double-click the item and enter a new value.\nPlease note that only plain text can be changed.";
+"TextNotStorable" = "Content can't be edited because Maccy is not saving text. Turn on Text in Storage settings to edit it.";

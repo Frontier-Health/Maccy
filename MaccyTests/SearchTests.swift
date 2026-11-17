@@ -248,7 +248,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
 
       return item
     }

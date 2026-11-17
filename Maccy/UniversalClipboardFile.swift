@@ -33,7 +33,8 @@ nonisolated enum UniversalClipboardFile {
     case tooLarge
   }
 
-  static let defaultMaximumBytes = 64 * 1_024 * 1_024
+  // The same limit as one representation of a copy.
+  static var defaultMaximumBytes: Int { ContentLimits.maximumRepresentationBytes }
 
   #if DEBUG
   nonisolated(unsafe) static var allowedDirectoriesForTesting: [String]?

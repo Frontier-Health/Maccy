@@ -71,6 +71,9 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     item.imageData.map { ByteCountFormatter.string(fromByteCount: Int64($0.count), countStyle: .file) }
   }
 
+  // Whether the preview text is cut short of the item's text.
+  var previewIsTruncated: Bool { previewText.isTruncated }
+
   // 10k characters seems to be more than enough on large displays
   var text: String { previewText.string.shortened(to: 10_000) }
 

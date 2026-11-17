@@ -51,6 +51,9 @@ nonisolated extension Defaults.Keys {
   static let lastReviewRequestedAt = Key<Date>("lastReviewRequestedAt", default: Date.now, suite: preferencesSuite)
   static let menuIcon = Key<MenuIcon>("menuIcon", default: .maccy, suite: preferencesSuite)
   static let migrations = Key<[String: Bool]>("migrations", default: [:], suite: preferencesSuite)
+  // Write-only for the settings; declared so changes can be observed. Read it
+  // only through OCRSetting.current, which handles a forced or wrong-type value.
+  static let ocrEnabled = Key<Bool>(OCRSetting.preferenceKey, default: true, suite: preferencesSuite)
   static let numberOfUsages = Key<Int>("numberOfUsages", default: 0, suite: preferencesSuite)
   static let pasteByDefault = Key<Bool>("pasteByDefault", default: false, suite: preferencesSuite)
   static let pinOrder = Key<PinOrder>("pinOrder", default: PinOrder(), suite: preferencesSuite)

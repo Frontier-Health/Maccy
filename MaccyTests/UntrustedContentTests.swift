@@ -46,6 +46,11 @@ extension SharedStateTests {
       UniversalClipboardFile.allowedDirectoriesForTesting = nil
       UniversalClipboardFile.maximumBytesForTesting = nil
       UniversalClipboardFile.readObserverForTesting = nil
+      ContentLimits.maximumRepresentationBytesForTesting = nil
+      ContentLimits.maximumCopyBytesForTesting = nil
+      ContentLimits.maximumImagePixelsForTesting = nil
+      OCRSetting.preferencesForTesting = nil
+      HistoryItem.visionInputObserverForTesting = nil
     }
 
     // MARK: Group 1: one value per type
@@ -317,7 +322,204 @@ extension SharedStateTests {
       #expect(RichTextImport.rtfImportsForTesting == imports + 1)
     }
 
+    // MARK: Group 4: size limits, OCR
+
+    @Test("A representation at the limit is recorded; one byte over and the whole copy is not")
+    func perRepresentationLimit() throws {
+      ContentLimits.maximumRepresentationBytesForTesting = 100
+      copyString(String(repeating: "a", count: 100))
+      #expect(checkNow().count == 1)
+
+      // Over the limit: nothing is recorded, and skip next isn't used up.
+      clipboard.perform(.toggleSkipNext)
+      copyString(String(repeating: "b", count: 101))
+      #expect(checkNow().isEmpty)
+      #expect(CaptureMode.effective(in: clipboard.capturePreferences) == .skipNext)
+      clipboard.perform(.toggleSkipNext)
+      #expect(CaptureMode.effective(in: clipboard.capturePreferences) == .capturing)
+    }
+
+    @Test("A copy at the total limit is recorded; one byte over and it is not")
+    func perCopyLimit() throws {
+      ContentLimits.maximumRepresentationBytesForTesting = 100
+      ContentLimits.maximumCopyBytesForTesting = 150
+      for (htmlBytes, recorded) in [(50, true), (51, false)] {
+        let item = NSPasteboardItem()
+        item.setString(String(repeating: "a", count: 100), forType: .string)
+        item.setString("<b>" + String(repeating: "c", count: htmlBytes - 7) + "</b>", forType: .html)
+        pasteboard.clearContents()
+        pasteboard.writeObjects([item])
+        #expect(checkNow().count == (recorded ? 1 : 0), "HTML of \(htmlBytes) bytes")
+      }
+
+      // Across pasteboard items too.
+      let first = NSPasteboardItem()
+      first.setString(String(repeating: "d", count: 100), forType: .string)
+      let second = NSPasteboardItem()
+      second.setData(Data(repeating: 1, count: 51), forType: .png)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([first, second])
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("The default limits fit a full-screen 8K screenshot as TIFF plus PNG")
+    func defaultLimitsFitScreenshots() {
+      let tiff = 7_680 * 4_320 * 4 + 64 * 1_024
+      #expect(tiff <= ContentLimits.maximumRepresentationBytes)
+      #expect(tiff + 45 * 1_024 * 1_024 <= ContentLimits.maximumCopyBytes)
+      #expect(7_680 * 4_320 <= ContentLimits.maximumImagePixels)
+      #expect(UniversalClipboardFile.maximumBytes == ContentLimits.maximumRepresentationBytes)
+    }
+
+    @Test("An image over the pixel limit is never decoded or passed to text recognition")
+    func pixelLimit() async throws {
+      ContentLimits.maximumImagePixelsForTesting = 100
+      let small = try pngData(width: 10, height: 10)
+      let large = try pngData(width: 11, height: 10)
+      #expect(ContentLimits.pixelSize(of: large)?.width == 11)
+      #expect(ContentLimits.imageMayBeDecoded(small))
+      #expect(!ContentLimits.imageMayBeDecoded(large))
+      #expect(!ContentLimits.imageMayBeDecoded(Data("not an image".utf8)))
+
+      #expect(imageItem(small).image != nil)
+      let largeItem = imageItem(large)
+      #expect(largeItem.image == nil)
+      #expect(HistoryItemDecorator(largeItem).hasImage == false)
+
+      let visionInputs = ThreadRecorder()
+      HistoryItem.visionInputObserverForTesting = { _ in visionInputs.record(false) }
+      #expect(await HistoryItem.recognizeText(imageData: large, fileURL: nil) == nil)
+      #expect(visionInputs.values.isEmpty)
+      _ = await HistoryItem.recognizeText(imageData: small, fileURL: nil)
+      #expect(visionInputs.values.count == 1)
+    }
+
+    @Test("ocrEnabled: absent and true recognise; false, forced false and wrong types don't")
+    func ocrSettingIsRead() throws {
+      let defaults = try scratchDefaults()
+      #expect(OCRSetting.effective(in: defaults) == OCRSetting(state: .on, isForced: false))
+      for (value, state) in [(true, OCRSetting.State.on), (false, .off)] as [(Any, OCRSetting.State)] {
+        defaults.set(value, forKey: OCRSetting.preferenceKey)
+        #expect(OCRSetting.effective(in: defaults).state == state)
+      }
+      let wrongTypes: [Any] = ["false", "yes", 2, 0.5, [false], ["ocrEnabled": false], Data(), Date()]
+      for value in wrongTypes {
+        defaults.set(value, forKey: OCRSetting.preferenceKey)
+        #expect(OCRSetting.effective(in: defaults).state == .invalid, "\(value)")
+        #expect(!OCRSetting.effective(in: defaults).isEnabled)
+      }
+      for (value, state) in [(1, OCRSetting.State.on), (0, .off)] {
+        defaults.set(value, forKey: OCRSetting.preferenceKey)
+        #expect(OCRSetting.effective(in: defaults).state == state)
+      }
+
+      defaults.set(true, forKey: OCRSetting.preferenceKey)
+      let managed = try #require(ManagedDefaults(suiteName: scratchSuiteName(), forced: [OCRSetting.preferenceKey: false]))
+      managed.set(true, forKey: OCRSetting.preferenceKey)
+      #expect(OCRSetting.effective(in: managed) == OCRSetting(state: .off, isForced: true))
+    }
+
+    @Test("With text recognition off no image goes to Vision, and earlier recognised titles are hidden and erased",
+          arguments: ["false", "forced false", "wrong type"])
+    func ocrOffRecognisesNothing(setting: String) throws {
+      let image = try pngData(width: 4, height: 4)
+      let defaults: UserDefaults
+      switch setting {
+      case "forced false":
+        let managed = try #require(ManagedDefaults(suiteName: scratchSuiteName(),
+                                                   forced: [OCRSetting.preferenceKey: false]))
+        managed.set(true, forKey: OCRSetting.preferenceKey)
+        defaults = managed
+      case "wrong type":
+        defaults = try scratchDefaults()
+        defaults.set("yes", forKey: OCRSetting.preferenceKey)
+      default:
+        defaults = try scratchDefaults()
+        defaults.set(false, forKey: OCRSetting.preferenceKey)
+      }
+
+      // A title recognised while it was on.
+      OCRSetting.preferencesForTesting = try scratchDefaults()
+      let item = imageItem(image)
+      item.setTitle("recognised secret", source: .content(NSPasteboard.PasteboardType.png.rawValue))
+      let typed = imageItem(try pngData(width: 5, height: 5))
+      typed.setTitle("my alias", source: .user)
+      try Storage.shared.context.save()
+      #expect(item.displayTitle == "recognised secret")
+
+      OCRSetting.preferencesForTesting = defaults
+      #expect(!OCRSetting.current.isEnabled)
+      #expect(item.displayTitle == "")
+      #expect(typed.displayTitle == "my alias")
+
+      let starts = HistoryItem.recognitionStartsForTesting
+      item.regenerateTitle()
+      #expect(HistoryItem.recognitionStartsForTesting == starts)
+      #expect(!item.acceptRecognizedText("late result", from: try #require(item.imageSource(readableBy: .everything))))
+
+      // Erased from the store, not only hidden; the alias is kept.
+      item.setTitle("recognised secret", source: .content(NSPasteboard.PasteboardType.png.rawValue))
+      try Storage.shared.context.save()
+      #expect(History.shared.applyOCRSetting() >= 1)
+      OCRSetting.preferencesForTesting = try scratchDefaults()
+      #expect(item.displayTitle == "")
+      #expect(typed.displayTitle == "my alias")
+
+      // On again: new images are recognised.
+      item.regenerateTitle()
+      #expect(HistoryItem.recognitionStartsForTesting == starts + 1)
+    }
+
+    @Test("The preview says when its text is cut short")
+    func truncatedPreviewIsIndicated() {
+      let long = HistoryItem(contents: [stringContent(String(repeating: "x", count: 20_000))])
+      Storage.shared.context.insert(long)
+      long.regenerateTitle()
+      let longDecorator = HistoryItemDecorator(long)
+      #expect(longDecorator.previewIsTruncated)
+      #expect(PreviewItemView.truncationNote(longDecorator.previewIsTruncated) != nil)
+
+      let short = HistoryItem(contents: [stringContent("short")])
+      Storage.shared.context.insert(short)
+      short.regenerateTitle()
+      let shortDecorator = HistoryItemDecorator(short)
+      #expect(!shortDecorator.previewIsTruncated)
+      #expect(PreviewItemView.truncationNote(shortDecorator.previewIsTruncated) == nil)
+    }
+
     // MARK: Helpers
+
+    private func copyString(_ string: String) {
+      pasteboard.clearContents()
+      pasteboard.setString(string, forType: .string)
+    }
+
+    private func imageItem(_ data: Data) -> HistoryItem {
+      let item = HistoryItem(contents: [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.png.rawValue, value: data)
+      ])
+      Storage.shared.context.insert(item)
+      return item
+    }
+
+    private func pngData(width: Int, height: Int) throws -> Data {
+      let rep = try #require(NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+      ))
+      return try #require(rep.representation(using: .png, properties: [:]))
+    }
+
+    private func scratchSuiteName() -> String {
+      "\(AppIdentity.bundleIdentifier).tests.untrustedContent.\(UUID().uuidString)"
+    }
+
+    private func scratchDefaults() throws -> UserDefaults {
+      let name = scratchSuiteName()
+      let defaults = try #require(UserDefaults(suiteName: name))
+      defaults.removePersistentDomain(forName: name)
+      return defaults
+    }
 
     // Whether WebKit (modern or legacy) is in the process. Doesn't load it.
     private var webKitIsLoaded: Bool {

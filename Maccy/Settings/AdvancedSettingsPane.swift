@@ -4,6 +4,7 @@ import Defaults
 struct AdvancedSettingsPane: View {
   @State private var captureMode = CaptureMode.capturing
   @State private var captureModeLocked = false
+  @State private var ocr = OCRSetting.current
 
   // On for both `paused` and `skipNext`. Switching it either way sets the whole
   // mode, which clears any pending one-shot skip. Disabled while a configuration
@@ -65,6 +66,31 @@ struct AdvancedSettingsPane: View {
       .disabled(UserDefaults.standard.objectIsForced(forKey: "intentsEnabled"))
       .help(Text("IntentsEnabledTooltip", tableName: "AdvancedSettings"))
 
+      Toggle(isOn: Binding(get: { ocr.isEnabled }, set: { Defaults[.ocrEnabled] = $0 })) {
+        if ocr.isForced {
+          Label {
+            Text(Self.ocrLabel)
+          } icon: {
+            Image(systemName: "lock.fill")
+          }
+        } else {
+          Text(Self.ocrLabel)
+        }
+      }
+      .disabled(ocr.isForced)
+      .help(Self.ocrHelp)
+      .task {
+        for await _ in Defaults.updates(.ocrEnabled) {
+          ocr = OCRSetting.current
+        }
+      }
+      if ocr.state == .invalid {
+        Text(Self.ocrInvalid(isForced: ocr.isForced))
+          .fixedSize(horizontal: false, vertical: true)
+          .foregroundStyle(.red)
+          .controlSize(.small)
+      }
+
       Defaults.Toggle(key: .clearOnQuit) {
         Text("ClearHistoryOnQuit", tableName: "AdvancedSettings")
       }.help(Text("ClearHistoryOnQuitTooltip", tableName: "AdvancedSettings"))
@@ -75,6 +101,31 @@ struct AdvancedSettingsPane: View {
     }
     .frame(minWidth: 350, maxWidth: 450)
     .padding()
+  }
+
+  // English only; other locales fall back to it.
+  private static func localized(_ key: String, _ value: String) -> String {
+    NSLocalizedString(key, tableName: "AdvancedSettings", value: value, comment: "")
+  }
+
+  static var ocrLabel: String {
+    localized("OCREnabled", "Recognize text in copied images")
+  }
+
+  static var ocrHelp: String {
+    localized(
+      "OCREnabledTooltip",
+      "Uses text recognition to title copied images. When off, no image is analysed, image titles are empty " +
+        "and titles recognised earlier are erased."
+    )
+  }
+
+  static func ocrInvalid(isForced: Bool) -> String {
+    isForced
+      ? localized("OCREnabledInvalidManaged",
+                  "The text recognition value in your configuration profile is invalid, so text recognition is off.")
+      : localized("OCREnabledInvalid",
+                  "The saved text recognition value is invalid, so text recognition is off. Turn it on or off to fix it.")
   }
 }
 

@@ -244,12 +244,15 @@ class Clipboard {
     var capturedTypes = Set<NSPasteboard.PasteboardType>()
     var capturedFileURLs = Set<Data>()
     var duplicatesDropped = 0
-    items.forEach({ item in
+    // Size limits (see ContentLimits), checked as each representation is read.
+    var tally = ContentLimits.Tally()
+    var violation: ContentLimits.Violation?
+    reading: for item in items {
       let types = Set(item.types)
       // Only representations that would be stored are read for this check.
       if allowList.allows(.string) && types.contains(.string) && isEmptyString(item) &&
           !richText(item, storing: allowList) {
-        return
+        continue
       }
 
       // Only the allow-list is stored. Beyond the reads above, the data of any
@@ -266,6 +269,10 @@ class Clipboard {
         guard case .store(let value) = allowList.admission(of: type, value: item.data(forType: type)) else {
           continue
         }
+        if let exceeded = tally.add(type, bytes: value?.count ?? 0) {
+          violation = exceeded
+          break reading
+        }
         if type == .fileURL {
           // A file URL without data has nothing to paste.
           guard let value else { continue }
@@ -277,7 +284,12 @@ class Clipboard {
         capturedTypes.insert(type)
         contents.append(HistoryItemContent(type: type.rawValue, value: value))
       }
-    })
+    }
+    // A copy over a limit is not recorded at all, and doesn't use up skip next.
+    if let violation {
+      logger.warning("Copy not recorded: \(violation.description)")
+      return
+    }
     if duplicatesDropped > 0 {
       logger.info(
         "Copy of \(items.count) pasteboard items kept one value per type; \(duplicatesDropped) duplicates not stored"

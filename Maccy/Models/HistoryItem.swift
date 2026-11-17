@@ -226,7 +226,9 @@ class HistoryItem {
       return Self.hiddenTitle
     }
 
-    if storedTitleIsReadable(by: allowList) {
+    // Text recognised in an image is not shown while recognition is off.
+    if storedTitleIsReadable(by: allowList) && !(titleIsRecognizedText(readableBy: allowList) &&
+                                                  !OCRSetting.current.isEnabled) {
       return title
     }
 
@@ -247,7 +249,9 @@ class HistoryItem {
   ) {
     if let imageSource = imageSource(readableBy: allowList) {
       setTitle("", source: imageSource.titleSource)
-      if recognizingImageText {
+      // With recognition off, an image's title stays empty and no image is
+      // passed to Vision.
+      if recognizingImageText && OCRSetting.current.isEnabled {
         recognizeTitle(from: imageSource)
       }
       return
@@ -345,11 +349,40 @@ class HistoryItem {
   @discardableResult
   func acceptRecognizedText(_ text: String, from source: HistoryItemImageSource) -> Bool {
     guard modelContext != nil, !isDeleted, titleSource == source.titleSource,
+          OCRSetting.current.isEnabled,
           imageSource(readableBy: StoragePolicy.currentReadAllowList) == source else {
       return false
     }
 
     setTitle(text, source: source.titleSource)
+    return true
+  }
+
+  // Whether the stored title is (or may be) text recognised in an image: its
+  // recorded source is an image, or it predates recorded sources and the item
+  // has an image.
+  func titleIsRecognizedText(readableBy allowList: StorageAllowList = .everything) -> Bool {
+    switch titleSource {
+    case .universalClipboardImage:
+      return true
+    case .content(let type):
+      return StorageType.images.types.contains(NSPasteboard.PasteboardType(type))
+    case .unknown:
+      return imageSource(readableBy: allowList) != nil ||
+        contents.contains { StorageType.images.types.contains(NSPasteboard.PasteboardType($0.type)) }
+    case .user, .nothing:
+      return false
+    }
+  }
+
+  // Empties a title recognised in an image, keeping its source, as when
+  // recognition is off. Returns whether the title changed.
+  @discardableResult
+  func eraseRecognizedTitle() -> Bool {
+    guard titleIsRecognizedText(), !title.isEmpty else {
+      return false
+    }
+    setTitle("", source: titleSource)
     return true
   }
 
@@ -392,6 +425,9 @@ class HistoryItem {
       fileURL = url
     }
 
+    #if DEBUG
+    Self.recognitionStartsForTesting += 1
+    #endif
     Task {
       if let recognizedText = await Self.recognizeText(imageData: imageData, fileURL: fileURL) {
         self.acceptRecognizedText(recognizedText, from: source)
@@ -425,6 +461,7 @@ class HistoryItem {
 
   // The text a title or preview is made from, and its type: file paths, else
   // plain text, else rich text, else HTML.
+  @MainActor
   private func titleText(readableBy allowList: StorageAllowList) -> (type: String, text: String)? {
     let urls = fileURLs(readableBy: allowList)
     if !urls.isEmpty, let content = firstContent([.fileURL], readableBy: allowList) {
@@ -584,7 +621,9 @@ class HistoryItem {
       return image
     }
 
-    guard let data = imageData(from: source) else {
+    // A decompression bomb (a small file declaring a huge image) is never
+    // decoded.
+    guard let data = imageData(from: source), ContentLimits.imageMayBeDecoded(data) else {
       return nil
     }
 
@@ -703,9 +742,16 @@ class HistoryItem {
     qos: .utility
   )
 
+  #if DEBUG
+  // How many recognitions were started, and the size of each image actually
+  // handed to Vision.
+  @MainActor static var recognitionStartsForTesting = 0
+  nonisolated(unsafe) static var visionInputObserverForTesting: (@Sendable (Int) -> Void)?
+  #endif
+
   /// Runs OCR on a dedicated queue so the blocking Vision call never occupies
   /// a thread of Swift's cooperative pool or the main thread.
-  nonisolated private static func recognizeText(imageData: Data?, fileURL: URL?) async -> String? {
+  nonisolated static func recognizeText(imageData: Data?, fileURL: URL?) async -> String? {
     await withCheckedContinuation { continuation in
       textRecognitionQueue.async {
         continuation.resume(returning: performTextRecognition(imageData: imageData, fileURL: fileURL))
@@ -719,6 +765,13 @@ class HistoryItem {
     guard let data = imageData ?? fileURL.flatMap({ try? UniversalClipboardFile.read($0) }) else {
       return nil
     }
+    // Vision decodes the whole image: only within the pixel limit.
+    guard ContentLimits.imageMayBeDecoded(data) else {
+      return nil
+    }
+    #if DEBUG
+    visionInputObserverForTesting?(data.count)
+    #endif
 
     let requestHandler = VNImageRequestHandler(data: data)
     let request = VNRecognizeTextRequest()

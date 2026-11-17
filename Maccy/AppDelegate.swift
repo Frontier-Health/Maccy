@@ -127,6 +127,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // run once now, and expiry keeps running while Maccy is open.
     History.shared.performLaunchMaintenance()
     History.shared.startExpirySchedule()
+
+    // With text recognition off, titles recognised earlier are erased, now
+    // and whenever the effective value changes.
+    Task {
+      for await _ in Defaults.updates(.ocrEnabled) {
+        History.shared.applyOCRSetting()
+        History.shared.items.forEach { $0.refreshTitle() }
+      }
+    }
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

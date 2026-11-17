@@ -66,6 +66,17 @@ struct PreviewItemView: View {
         }
       }
 
+      if !item.hasImage, let note = Self.truncationNote(item.previewIsTruncated) {
+        Label {
+          Text(note)
+            .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+          Image(systemName: "scissors")
+            .foregroundStyle(.secondary)
+        }
+        .padding(.top, 6)
+      }
+
       if let note = Self.formattedTextNote(item.formattedTextComparison) {
         Label {
           Text(note)
@@ -128,6 +139,18 @@ struct PreviewItemView: View {
   }
 
   // English only; other locales fall back to it.
+  static func truncationNote(_ isTruncated: Bool) -> String? {
+    guard isTruncated else {
+      return nil
+    }
+    return NSLocalizedString(
+      "PreviewTruncated",
+      tableName: "PreviewItemView",
+      value: "Preview truncated: this copy is longer than what is shown. Pasting inserts all of it.",
+      comment: ""
+    )
+  }
+
   static func formattedTextNote(_ comparison: FormattedTextComparison) -> String? {
     switch comparison {
     case .notApplicable, .same:

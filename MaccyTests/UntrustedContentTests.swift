@@ -696,7 +696,8 @@ extension SharedStateTests {
       // Within the limits the largest image is the one decoded.
       ContentLimits.maximumImagePixelsForTesting = 400
       let decoded = try #require(ValidatedImage.cgImage(from: tiff, for: .fullSize))
-      #expect([decoded.width, decoded.height] == [20, 20])
+      #expect(decoded.width == 20)
+      #expect(decoded.height == 20)
 
       // Animations: the number of frames and their total pixels are bounded.
       ContentLimits.maximumImagePixelsForTesting = 100
@@ -717,7 +718,8 @@ extension SharedStateTests {
         let item = imageItem(data, type: type)
         #expect(item.imagePixelSize == NSSize(width: 30, height: 20))
         let image = try #require(await item.decodedImage(for: .preview))
-        #expect([image.cgImage.width, image.cgImage.height] == [30, 20])
+        #expect(image.cgImage.width == 30)
+        #expect(image.cgImage.height == 20)
       }
       // A thumbnail is decoded at most 1024 pixels on its longest side.
       let large = try container(.png, [(3_000, 2_000)])
@@ -750,7 +752,9 @@ extension SharedStateTests {
       let (_, url) = try await Get.export(item)
       let exported = try Data(contentsOf: try #require(url))
       #expect(Array(exported.prefix(8)) == [137, 80, 78, 71, 13, 10, 26, 10])
-      #expect(ValidatedImage.pixelSize(of: exported).map { [$0.width, $0.height] } == [6, 4])
+      let exportedSize = try #require(ValidatedImage.pixelSize(of: exported))
+      #expect(exportedSize.width == 6)
+      #expect(exportedSize.height == 4)
       #expect(ValidatedImage.decodesForTesting > decodes)
 
       // Intents turned off while the image was converted: nothing is handed out.

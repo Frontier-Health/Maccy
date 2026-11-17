@@ -65,7 +65,7 @@ struct IgnoreApplicationsSettingsView: View {
               ignoredApps.append(bundleIdentifier)
             }
           case .failure(let error):
-            print("Failed to select application: \(error)")
+            print("Failed to select application: \(Notifier.redacted(error))")
           }
         }
 

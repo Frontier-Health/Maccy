@@ -211,6 +211,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return false
     }
 
+    // Revoke files already handed out under an older policy, even if clean-up fails.
+    IntentImageExports.removeAll()
+
     let result: StorageCleanUpResult
     do {
       result = try Storage.shared.cleanUp(to: allowList)
@@ -312,7 +315,11 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       item.firstCopiedAt = existingHistoryItem.firstCopiedAt
       item.numberOfCopies += existingHistoryItem.numberOfCopies
       item.pin = existingHistoryItem.pin
-      IntentImageExports.transfer(from: existingHistoryItem, to: item)
+      if contentsChanged {
+        IntentImageExports.remove(for: existingHistoryItem)
+      } else {
+        IntentImageExports.transfer(from: existingHistoryItem, to: item)
+      }
       // An alias is kept. With the older contents comes their title, with the
       // source it recorded; it is kept only while that source survives here.
       // A modified copy keeps the title of its own contents.
@@ -336,9 +343,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       }
       deleteFromStorage(existingHistoryItem)
     } else {
-      Task {
-        Notifier.notify(for: item, sound: .write)
-      }
+      Notifier.notify(for: item, sound: .write)
     }
 
     // Remove exceeding items. Do this after the item is added to avoid removing something

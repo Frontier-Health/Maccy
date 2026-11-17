@@ -50,6 +50,44 @@ extension SharedStateTests {
       Defaults[.ignoredPasteboardTypes] = savedIgnoredPasteboardTypes
     }
 
+    @Test("Rejected copies neither notify nor consume skip-next",
+          arguments: ["ignoreRules", "storagePolicy"])
+    func rejectedCopiesHaveNoArtifacts(reason: String) {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer {
+        clipboard.clearHooks()
+        Notifier.client = savedClient
+      }
+      History.shared.clearAll()
+      Defaults[.enabledPasteboardTypes] = StoragePolicy.defaultEnabledTypes
+      clipboard.onNewCopy { History.shared.add($0) }
+      Defaults[.ignoreRegexp] = reason == "ignoreRules" ? ["SECRET"] : []
+      if reason == "storagePolicy" { Defaults[.enabledPasteboardTypes] = [.fileURL] }
+      clipboard.perform(.toggleSkipNext)
+      pasteboard.clearContents()
+      pasteboard.setString("SECRET", forType: .string)
+      clipboard.checkForChangesInPasteboard()
+      #expect(CaptureMode.effective(in: clipboard.capturePreferences) == .skipNext)
+      #expect(History.shared.items.isEmpty)
+      client.resolvePermissions()
+      #expect(client.added.isEmpty)
+      Defaults[.ignoreRegexp] = []
+      Defaults[.enabledPasteboardTypes] = StoragePolicy.defaultEnabledTypes
+      pasteboard.clearContents()
+      pasteboard.setString("eligible but skipped", forType: .string)
+      clipboard.checkForChangesInPasteboard()
+      #expect(CaptureMode.effective(in: clipboard.capturePreferences) == .capturing)
+      #expect(History.shared.items.isEmpty)
+      pasteboard.clearContents()
+      pasteboard.setString("eligible and recorded", forType: .string)
+      clipboard.checkForChangesInPasteboard()
+      #expect(History.shared.items.count == 1)
+      client.resolvePermissions()
+      #expect(client.added.count == 1)
+    }
+
     @Test("Changes listener and add hooks")
     func changesListenerAndAddHooks() async throws {
       let copies = try await waitForCopies(after: {

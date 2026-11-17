@@ -676,6 +676,99 @@ extension SharedStateTests {
       #expect(logged == "ExampleDomain code 1570")
     }
 
+    @Test("Deleting immediately after add cannot register a late notification")
+    func immediateDeleteDropsNotification() async {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+      let item = historyItem("delete synchronously")
+      let decorator = history.added(item)
+      history.delete(decorator)
+      await Task.yield()
+      client.resolvePermissions()
+      #expect(!Notifier.isActive(item.notificationID))
+      #expect(client.added.isEmpty)
+    }
+
+    @Test("Every removal path revokes notifications and intent exports",
+          arguments: ["delete", "clear", "clearAll", "trim", "policy", "pendingPolicy"])
+    func removalRevokesArtifacts(path: String) throws {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      let savedStorage = SavedStoragePreference()
+      Notifier.client = client
+      defer {
+        Notifier.client = savedClient
+        savedStorage.restore()
+      }
+      let item = historyItem("artifact owner")
+      let decorator = history.added(item)
+      let identifier = item.notificationID
+      client.resolvePermissions()
+      client.resolveAdds()
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: item)
+      if path == "policy" || path == "clearAll" {
+        history.togglePin(decorator)
+      }
+      switch path {
+      case "delete": history.delete(decorator)
+      case "clear": history.clear()
+      case "clearAll": history.clearAll()
+      case "trim":
+        Defaults[.size] = 1
+        history.added(historyItem("replacement with different content"))
+      case "policy":
+        Defaults[.enabledPasteboardTypes] = [.fileURL]
+        #expect(history.storageSettingChanged())
+      case "pendingPolicy":
+        item.setAlias("pending change before policy cleanup")
+        try Storage.shared.cleanUp(to: StorageAllowList(enabledTypes: [.fileURL]))
+      default: Issue.record("unknown removal path")
+      }
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+      #expect(client.removed.contains(identifier))
+      #expect(!Notifier.isActive(identifier))
+    }
+
+    @Test("A policy change revokes prior exports even when storage cleanup fails")
+    func failedPolicyCleanupRevokesExports() throws {
+      struct InjectedFailure: Error {}
+      let savedStorage = SavedStoragePreference()
+      defer {
+        Storage.shared.saveFailureForTesting = nil
+        savedStorage.restore()
+      }
+      let item = historyItem("retained after failed cleanup")
+      history.added(item)
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: item)
+      Storage.shared.saveFailureForTesting = InjectedFailure()
+      Defaults[.enabledPasteboardTypes] = [.fileURL]
+      #expect(!history.storageSettingChanged())
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+      #expect(item.contents.contains { $0.type == NSPasteboard.PasteboardType.string.rawValue })
+      #expect(!item.displayTitle.contains("retained"))
+    }
+
+    @Test("Partial storage cleanup revokes exports and keeps the retained item's notification")
+    func partialCleanupRevokesExports() throws {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+      let item = historyItem("keep allowed text")
+      item.contents.append(HistoryItemContent(type: NSPasteboard.PasteboardType.png.rawValue,
+                                             value: Data("image bytes".utf8)))
+      history.added(item)
+      client.resolvePermissions()
+      client.resolveAdds()
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: item)
+      try Storage.shared.cleanUp(to: StorageAllowList(enabledTypes: [.string]))
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+      #expect(!client.removed.contains(item.notificationID))
+      #expect(item.text == "keep allowed text")
+    }
+
     private func waitUntil(_ condition: () -> Bool) async {
       for _ in 0..<2000 where !condition() {
         try? await Task.sleep(for: .milliseconds(1))

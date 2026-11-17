@@ -67,7 +67,7 @@ extension SharedStateTests {
     func disabledIntentsDoNotTouchHistory() async {
       let savedEnabled = Defaults[.intentsEnabled]
       let history = AppState.shared.history
-      let decorator = history.add(historyItem("kept while intents are disabled"))
+      let decorator = history.added(historyItem("kept while intents are disabled"))
       let countBefore = history.items.count
       Defaults[.intentsEnabled] = false
       defer {
@@ -103,8 +103,8 @@ extension SharedStateTests {
     func deleteRemovesOnlyOwnExports() throws {
       defer { IntentImageExports.removeAll() }
       let history = AppState.shared.history
-      let deleted = history.add(historyItem("export owner that is deleted"))
-      let kept = history.add(historyItem("export owner that is kept"))
+      let deleted = history.added(historyItem("export owner that is deleted"))
+      let kept = history.added(historyItem("export owner that is kept"))
       defer { history.delete(kept) }
       let data = Data("test image".utf8)
       let deletedExport = try IntentImageExports.write(data, for: deleted.item)
@@ -120,10 +120,10 @@ extension SharedStateTests {
     func exportsFollowDuplicateReplacement() throws {
       defer { IntentImageExports.removeAll() }
       let history = AppState.shared.history
-      let original = history.add(historyItem("exported then copied again"))
+      let original = history.added(historyItem("exported then copied again"))
       let export = try IntentImageExports.write(Data("test image".utf8), for: original.item)
 
-      let replacement = history.add(historyItem("exported then copied again"))
+      let replacement = history.added(historyItem("exported then copied again"))
 
       #expect(FileManager.default.fileExists(atPath: export.path))
 
@@ -135,7 +135,7 @@ extension SharedStateTests {
     @Test("Clearing history removes every export")
     func clearRemovesExports() throws {
       let history = AppState.shared.history
-      let decorator = history.add(historyItem("export owner that is cleared"))
+      let decorator = history.added(historyItem("export owner that is cleared"))
       let export = try IntentImageExports.write(Data("test image".utf8), for: decorator.item)
 
       history.clear()
@@ -157,6 +157,33 @@ extension SharedStateTests {
       #expect(IntentImageExports.legacyExport.lastPathComponent == "image.png")
     }
 
+    @Test("Disabled read intents do not clean history or revoke existing exports")
+    func disabledReadsDoNotApplyStoragePolicy() async throws {
+      let savedStorage = SavedStoragePreference()
+      let savedEnabled = Defaults[.intentsEnabled]
+      let history = AppState.shared.history
+      let decorator = history.added(historyItem("intent gate precedes cleanup"))
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: decorator.item)
+      defer {
+        savedStorage.restore()
+        Defaults[.intentsEnabled] = savedEnabled
+        history.delete(decorator)
+      }
+      Defaults[.enabledPasteboardTypes] = []
+      Defaults[.intentsEnabled] = false
+      await #expect(throws: AppIntentError.disabled) { _ = try await Get().perform() }
+      await #expect(throws: AppIntentError.disabled) { _ = try await Select().perform() }
+      #expect(decorator.item.contents.count == 1)
+      #expect(FileManager.default.fileExists(atPath: export.path))
+      Defaults[.intentsEnabled] = true
+      var get = Get()
+      get.selected = false
+      get.number = 1
+      // Other items may exist, but an empty allow-list removes all content first.
+      await #expect(throws: AppIntentError.notFound) { _ = try await get.perform() }
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+    }
+
     private func historyItem(_ value: String) -> HistoryItem {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
@@ -167,7 +194,7 @@ extension SharedStateTests {
         )
       ]
       item.numberOfCopies = 1
-      item.title = item.generateTitle()
+      item.regenerateTitle()
       return item
     }
   }

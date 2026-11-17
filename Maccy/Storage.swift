@@ -30,7 +30,7 @@ class Storage {
     do {
       container = try ModelContainer(for: HistoryItem.self, configurations: config)
     } catch let error {
-      fatalError("Cannot load database: \(error.localizedDescription).")
+      fatalError("Cannot load database: \(Notifier.redacted(error)).")
     }
   }
 
@@ -112,6 +112,13 @@ class Storage {
       if context.hasChanges {
         try save()
       }
+      for item in result.removedItems {
+        Notifier.removeDelivered(for: item)
+        IntentImageExports.remove(for: item)
+      }
+      for item in result.changedItems {
+        IntentImageExports.remove(for: item)
+      }
       return result
     } catch {
       undo.restore()
@@ -148,6 +155,8 @@ class Storage {
       } else {
         item.contents.forEach(context.delete)
         context.delete(item)
+        Notifier.removeDelivered(for: item)
+        IntentImageExports.remove(for: item)
       }
     }
 
@@ -207,7 +216,7 @@ class Storage {
 
   private func applyCleanUp(to allowList: StorageAllowList, undo: CleanUpUndoLog) throws -> StorageCleanUpResult {
     let plan = try cleanUpPlan(for: allowList)
-    var result = StorageCleanUpResult(impact: plan.impact)
+    var result = StorageCleanUpResult(impact: plan.impact, removedItems: plan.itemsToRemove)
     let removedIDs = Set(plan.itemsToRemove.map(\.persistentModelID))
     // Disallowed contents of items being removed, and of no item at all.
     let unattachedContents = plan.disallowedContents.filter { content in
@@ -392,6 +401,7 @@ struct StorageCleanUpResult {
   var orphansRemoved = 0
   // Items kept but changed, for the caller to refresh what it shows.
   var changedItems: [HistoryItem] = []
+  var removedItems: [HistoryItem] = []
 
   var hasChanges: Bool { impact.affectsHistory || markersNormalised > 0 || orphansRemoved > 0 }
 

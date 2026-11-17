@@ -132,8 +132,8 @@ class Clipboard {
     pasteboard.setString(item.application ?? "", forType: .source)
     sync()
 
+    Notifier.notify(for: item, sound: .knock)
     Task {
-      Notifier.notify(for: item, sound: .knock)
       checkForChangesInPasteboard()
     }
   }

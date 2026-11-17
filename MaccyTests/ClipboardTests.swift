@@ -39,12 +39,10 @@ extension SharedStateTests {
       savedCaptureSettings.clear()
       clipboard.syncCaptureState()
       clipboard.clearHooks()
+      resetTestSeams()
     }
 
-    // Isolated: it resets main actor state.
-    isolated deinit {
-      clipboard.sourceBundleIdentifierForTesting = nil
-      clipboard.afterInspectionForTesting = nil
+    deinit {
       Defaults[.enabledPasteboardTypes] = savedEnabledTypes
       savedCaptureSettings.restore()
       Defaults[.ignoreRegexp] = savedIgnoreRegexp
@@ -361,6 +359,7 @@ extension SharedStateTests {
     @Test("Allow-list mode rejects a copy from an unknown source app and keeps skip next",
           arguments: [nil, ""] as [String?])
     func allowListRejectsUnknownSource(bundleIdentifier: String?) {
+      defer { resetTestSeams() }
       Defaults[.ignoreAllAppsExceptListed] = true
       Defaults[.ignoredApps] = ["com.example.listed"]
       clipboard.sourceBundleIdentifierForTesting = { bundleIdentifier }
@@ -387,6 +386,7 @@ extension SharedStateTests {
 
     @Test("Allow-list mode still rejects a source app that is not listed")
     func allowListStillRejectsUnlistedSource() {
+      defer { resetTestSeams() }
       Defaults[.ignoreAllAppsExceptListed] = true
       Defaults[.ignoredApps] = ["com.example.listed"]
       clipboard.sourceBundleIdentifierForTesting = { "com.example.other" }
@@ -396,6 +396,7 @@ extension SharedStateTests {
 
     @Test("Block-list mode still records a copy from an unknown source app", arguments: [nil, ""] as [String?])
     func blockListRecordsUnknownSource(bundleIdentifier: String?) {
+      defer { resetTestSeams() }
       Defaults[.ignoreAllAppsExceptListed] = false
       Defaults[.ignoredApps] = ["com.example.blocked"]
       clipboard.sourceBundleIdentifierForTesting = { bundleIdentifier }
@@ -406,6 +407,13 @@ extension SharedStateTests {
       clipboard.sourceBundleIdentifierForTesting = { "com.example.blocked" }
       copyString("from a blocked app")
       #expect(checkNow().isEmpty)
+    }
+
+    // Test-only hooks in the shared watcher; every test that sets one resets
+    // them with `defer`, and each test starts from none.
+    private func resetTestSeams() {
+      clipboard.sourceBundleIdentifierForTesting = nil
+      clipboard.afterInspectionForTesting = nil
     }
 
     // Makes `copyReplacement` happen once, after the watcher has read the
@@ -427,6 +435,7 @@ extension SharedStateTests {
 
     @Test("A copy replaced while it is being read records nothing; the next check records the new copy once")
     func copyReplacedWhileReadingIsDiscarded() {
+      defer { resetTestSeams() }
       copyString("first copy")
       replaceCopyWhileReading { [self] in copyString("second copy") }
       #expect(checkNow().isEmpty)
@@ -438,6 +447,7 @@ extension SharedStateTests {
 
     @Test("A copy replaced while it is being read does not use up skip next")
     func copyReplacedWhileReadingKeepsSkipNext() {
+      defer { resetTestSeams() }
       setCaptureMode(.skipNext)
       copyString("first copy")
       replaceCopyWhileReading { [self] in copyString("second copy") }
@@ -454,6 +464,7 @@ extension SharedStateTests {
 
     @Test("A replacement that the filters reject is not recorded under the first copy's checks")
     func replacementIsFilteredOnItsOwn() {
+      defer { resetTestSeams() }
       copyString("first copy")
       replaceCopyWhileReading { [self] in copyString("second copy", types: [.string, .concealed]) }
       #expect(checkNow().isEmpty)
@@ -463,6 +474,7 @@ extension SharedStateTests {
 
     @Test("A copy that is not replaced while it is being read is recorded as before")
     func unchangedCopyIsRecorded() {
+      defer { resetTestSeams() }
       copyString("only copy")
       clipboard.afterInspectionForTesting = {}
       #expect(recordedStrings(checkNow()) == ["only copy"])

@@ -176,6 +176,7 @@ class HistoryItem {
     }
   }
 
+  @MainActor
   private static func formatTitle(_ text: String) -> String {
     // 1k characters is trade-off for performance
     var title = text

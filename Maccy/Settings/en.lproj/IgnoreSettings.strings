@@ -6,7 +6,7 @@
 "IgnoredPasteboardTypesDescription" = "It's possible to ignore certain pasteboard item types from remembering.\nBy default, some known application-specific types are defined. You can remove them and add any custom types you want.";
 "IgnoredPasteboardTypesReset" = "Reset";
 "RegexpTab" = "Regular expressions";
-"IgnoredRegexpsDescription" = "Ignore rules check plain text, RTF text, and visible and hidden HTML text. CSS and data-URI payloads are excluded. Identical text is checked once after trimming trailing whitespace. Copies above 80,000 UTF-16 units, 8 MiB of text data or 512 KiB of RTF are rejected. Unreadable data and matching beyond a cooperative 100 ms budget also reject the copy. Press Return to save a rule.";
+"IgnoredRegexpsDescription" = "Ignore rules check plain text, RTF text, and visible and hidden HTML text. Image addresses are not checked; link addresses are, so long-random-string rules can reject long links. CSS and binary data-URI payloads are excluded; text data URIs are checked. Originals are matched once per whitespace-normalised text, preferring plain text. Roughly 50,000 characters of an ordinary rich copy fit; markup and rules affect capacity. Copies above 104,000 UTF-16 units, 8 MiB of text data, 512 KiB of RTF excluding pictures/binary data, or 16 MiB of raw RTF are rejected. Unreadable data and matching beyond a cooperative 100 ms budget also reject the copy. Press Return to save a rule.";
 
 "InvalidIgnoreRule" = "A stored ignore rule is invalid. Maccy is not saving anything you copy until this rule is fixed or removed.";
 "InvalidManagedIgnoreRule" = "A managed ignore rule is invalid. Maccy is not saving anything you copy. Ask your administrator to fix or remove the rule in your configuration profile.";
@@ -19,3 +19,5 @@
 "TooManyManagedIgnoreRules" = "Your configuration profile has more than 128 ignore rules. Maccy is not saving anything you copy. Ask your administrator to reduce the list to at most 128.";
 "ResetIgnoreRules" = "Reset rules";
 "ResetIgnoreRulesConfirmation" = "Remove all saved ignore rules? Maccy will resume saving copies without these rules until you add them again.";
+
+"IgnoreRuleAddLimit" = "You can add at most 128 ignore rules. Remove a rule before adding another.";

@@ -606,10 +606,12 @@ extension SharedStateTests {
     func ignoreUnreadableRichText() {
       Defaults[.ignoreRegexp] = ["secret"]
       for html in ["<p>unclosed", "<!DOCTYPE html><p>safe</p>", "<p>&unknown;</p>",
-                   "<!DOCTYPE x [<!ENTITY x 'secret'>]><p>&x;</p>"] {
+                   "<!DOCTYPE x [<!ENTITY x 'ordinary'>]><p>&x;</p>"] {
         copyRichText(html, type: .html)
         #expect(checkNow().count == 1)
       }
+      copyRichText("<!DOCTYPE x [<!ENTITY x 'secret'>]><p>&x;</p>", type: .html)
+      #expect(checkNow().isEmpty)
       copyRichText("not RTF", type: .rtf)
       #expect(checkNow().isEmpty)
     }
@@ -1476,6 +1478,13 @@ struct ClipboardHTMLTextTests {
     #expect(text.hidden.contains("if(a < b) 'secret'"))
     #expect(text.hasContent)
     #expect(ClipboardHTMLText.inspect("<img src='data:image/png;base64,AAAA BBBB'>").hidden == "src")
+    let binaryLink = ClipboardHTMLText.inspect("<a href='data:image/png;base64,AAAA'>ordinary</a>")
+    #expect(binaryLink.hidden.contains("data:image/png;base64,"))
+    #expect(!binaryLink.hidden.contains("AAAA"))
+    let textLink = ClipboardHTMLText.inspect("<a href='data:text/plain;base64,SECRET'>ordinary</a>")
+    #expect(textLink.hidden.contains("SECRET"))
+    #expect(ClipboardHTMLText.inspect("<!DOCTYPE x [<!ENTITY x 'SECRET'>]>").hidden.contains("SECRET"))
+    #expect(ClipboardHTMLText.extract("<!DOCTYPE x [<!ENTITY x 'SECRET'>]><p>&x;</p>").contains("&x;"))
   }
 
   @Test("BOM-less UTF-16 beyond the ASCII signature is decoded; embedded NULs fail closed")
@@ -1613,7 +1622,7 @@ struct ClipboardHTMLTextTests {
     #expect(!IgnoreRules(preferences: defaults).rejects([item]))
   }
 
-  @Test("Cheap representations across all items precede RTF; RTF has its own aggregate byte cap")
+  @Test("Plain matches precede RTF import; derived matches and RTF caps fail closed")
   func rtfCostBoundary() throws {
     let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))

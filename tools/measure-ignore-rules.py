@@ -122,8 +122,9 @@ for (target, rows) in [(32_000, 100), (60_000, 200), (80_000, 300), (96_000, 400
     fflush(nil)
   }
 }
-for size in [1, 4, 8, 16] {
-  let rtf = Fixtures.wordPictureRTF("Annual report", pictureBytes: size * 1024 * 1024 / 4)
+for size in [1, 4, 8, 16, 17] {
+  let payload = size * 1024 * 1024 / 4 - (size == 16 ? 1024 : 0)
+  let rtf = Fixtures.wordPictureRTF("Annual report", pictureBytes: payload)
   let item = NSPasteboardItem()
   item.setString("Annual report", forType: .string)
   item.setData(rtf, forType: .rtf)

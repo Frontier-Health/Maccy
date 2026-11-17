@@ -85,6 +85,10 @@ struct PreviewItemView: View {
         .padding(.top, 6)
       }
 
+      if let note = Self.severalPicturesNote(item.imageHasSeveralPictures) {
+        warning(note)
+      }
+
       let warnings = item.textWarnings
       if let pastedText = warnings.pastedText {
         PastedTextView(text: pastedText)
@@ -190,6 +194,18 @@ struct PreviewItemView: View {
         .foregroundStyle(.orange)
     }
     .padding(.top, 6)
+  }
+
+  static func severalPicturesNote(_ hasSeveralPictures: Bool) -> String? {
+    guard hasSeveralPictures else {
+      return nil
+    }
+    return NSLocalizedString(
+      "SeveralPictures",
+      tableName: "PreviewItemView",
+      value: "This image file contains several pictures. Other apps may show a different one.",
+      comment: ""
+    )
   }
 
   static var universalClipboardUnavailableNote: String {

@@ -55,6 +55,13 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     }
     return item.imageInspection != nil
   }
+  // An item stored before images were made unambiguous at capture may hold
+  // an image file with several pictures. The preview shows the first; other
+  // apps may show another, so the preview says so.
+  var imageHasSeveralPictures: Bool {
+    hasImage && (item.imageInspection?.imageCount ?? 0) > 1
+  }
+
   var isUniversalClipboardImage: Bool {
     if case .universalClipboardFile = item.imageSource(readableBy: StoragePolicy.currentReadAllowList) {
       return true

@@ -297,7 +297,73 @@ class Clipboard {
       return
     }
 
+    let application = sourceApp?.bundleIdentifier
+    // An image file holding several images is made unambiguous before it is
+    // stored (ValidatedImage.canonicalForm), off the main actor; the rest of
+    // the copy is recorded with it when that is done. Single images, the
+    // usual case, are recorded now, byte for byte.
+    if contents.contains(where: { content in
+      Self.imageTypes.contains(content.type) && content.value.map(ValidatedImage.hasSeveralImages) == true
+    }) {
+      let capturedAt = Date.now
+      let task = Task { @MainActor [weak self] in
+        guard let self, let canonical = await Self.canonicalImages(contents, logger: logger) else { return }
+        // Capture may have been paused, or the storage setting changed,
+        // while the images were re-encoded.
+        guard CaptureMode.effective(in: capturePreferences) == .capturing,
+              let currentAllowList = StoragePolicy.current.allowList,
+              currentAllowList.hasStorableContent(canonical.map { NSPasteboard.PasteboardType($0.type) }) else {
+          return
+        }
+        record(canonical, application: application, capturedAt: capturedAt)
+      }
+      #if DEBUG
+      pendingImageCanonicalizationForTesting = task
+      #endif
+      return
+    }
+
+    record(contents, application: application, capturedAt: nil)
+  }
+
+  private static let imageTypes = Set(StorageType.images.types.map(\.rawValue))
+
+  #if DEBUG
+  // The latest capture waiting for its images to be re-encoded.
+  var pendingImageCanonicalizationForTesting: Task<Void, Never>?
+  #endif
+
+  // Replaces each multi-image representation with its single-image form.
+  // A representation that can't be re-encoded is left out, with a
+  // content-free log line; nil if nothing is left.
+  @MainActor
+  private static func canonicalImages(_ contents: [HistoryItemContent], logger: Logger) async -> [HistoryItemContent]? {
+    var kept: [HistoryItemContent] = []
+    for content in contents {
+      guard imageTypes.contains(content.type), let value = content.value else {
+        kept.append(content)
+        continue
+      }
+      switch await ValidatedImage.canonicalize(value) {
+      case .unchanged:
+        kept.append(content)
+      case .replaced(let single):
+        content.value = single
+        kept.append(content)
+      case .refused:
+        logger.warning("Image representation \(content.type) not stored: several images that couldn't be re-encoded")
+      }
+    }
+    return kept.isEmpty ? nil : kept
+  }
+
+  @MainActor
+  private func record(_ contents: [HistoryItemContent], application: String?, capturedAt: Date?) {
     let historyItem = HistoryItem(contents: contents)
+    if let capturedAt {
+      historyItem.firstCopiedAt = capturedAt
+      historyItem.lastCopiedAt = capturedAt
+    }
 
     if #unavailable(macOS 15.0) {
       // On macOS 14 the history item needs to be inserted into storage directly after creating it.
@@ -307,7 +373,7 @@ class Clipboard {
       }
     }
 
-    historyItem.application = sourceApp?.bundleIdentifier
+    historyItem.application = application
     historyItem.regenerateTitle()
 
     onNewCopyHooks.forEach({ $0(historyItem) })

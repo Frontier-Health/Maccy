@@ -1045,9 +1045,18 @@ nonisolated final class TextRecognitionJob: @unchecked Sendable {
 
   var isCancelled: Bool { lock.withLock { cancelled } }
 
+  #if DEBUG
+  // Whether `cancel()` found a Vision request registered and cancelled it.
+  private var cancelledRequest = false
+  var cancelledRunningRequestForTesting: Bool { lock.withLock { cancelledRequest } }
+  #endif
+
   func cancel() {
     let running = lock.withLock {
       cancelled = true
+      #if DEBUG
+      cancelledRequest = request != nil
+      #endif
       return request
     }
     running?.cancel()

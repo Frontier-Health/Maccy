@@ -704,11 +704,13 @@ extension SharedStateTests {
       #expect(ValidatedImage.cgImage(from: tiff, for: .fullSize) == nil)
       #expect(ValidatedImage.decodesForTesting == decodes)
 
-      // Within the limits the largest image is the one decoded.
+      // Within the limits the first image is the one decoded (what other apps
+      // show); the largest is what capture keeps.
       ContentLimits.maximumImagePixelsForTesting = 400
       let decoded = try #require(ValidatedImage.cgImage(from: tiff, for: .fullSize))
-      #expect(decoded.width == 20)
-      #expect(decoded.height == 20)
+      #expect(decoded.width == 10)
+      #expect(decoded.height == 10)
+      #expect(try ValidatedImage.inspect(tiff).get().largestIndex == 1)
 
       // Animations: the number of frames and their total pixels are bounded.
       ContentLimits.maximumImagePixelsForTesting = 100
@@ -1011,6 +1013,76 @@ extension SharedStateTests {
       #expect(UniversalClipboardFile.accessDeniedLogsForTesting == 1)
     }
 
+    // MARK: Second review round: one picture per stored image
+
+    @Test("A multi-image TIFF is stored as the single image previewed; copy-back, Get and other decoders agree")
+    func multiImageTIFFIsCanonicalized() async throws {
+      let exports = FileManager.default.temporaryDirectory.appending(path: "a7-canonical-\(UUID().uuidString)")
+      IntentImageExports.directoryForTesting = exports
+      defer {
+        IntentImageExports.directoryForTesting = nil
+        try? FileManager.default.removeItem(at: exports)
+      }
+      Defaults[.intentsEnabled] = true
+      // The reviewer's input: a 10×10 red first page and a 20×20 green second page.
+      let tiff = try container(.tiff, [(10, 10), (20, 20)], colors: [(1, 0, 0), (0, 1, 0)])
+      #expect(try ValidatedImage.inspect(tiff).get().imageCount == 2)
+      pasteboard.clearContents()
+      pasteboard.setData(tiff, forType: .tiff)
+
+      let item = try #require(await checkNowAwaitingImages().first)
+      let stored = try #require(item.contents.first { $0.type == NSPasteboard.PasteboardType.tiff.rawValue }?.value)
+      #expect(stored != tiff)
+      let inspection = try ValidatedImage.inspect(stored).get()
+      #expect(inspection.imageCount == 1)
+      #expect(inspection.width == 20 && inspection.height == 20)
+
+      // The preview, a plain AppKit decoder, copy-back and Get all see the green 20×20 picture.
+      let preview = try #require(await item.decodedImage(for: .preview))
+      try expectGreen(preview.cgImage, width: 20)
+      try expectGreen(try #require(NSBitmapImageRep(data: stored)?.cgImage), width: 20)
+      #expect(!HistoryItemDecorator(item).imageHasSeveralPictures)
+
+      clipboard.copy(item)
+      let pasted = try #require(pasteboard.data(forType: .tiff))
+      try expectGreen(try #require(NSBitmapImageRep(data: pasted)?.cgImage), width: 20)
+
+      let (_, url) = try await Get.export(item)
+      let exported = try Data(contentsOf: try #require(url))
+      try expectGreen(try #require(NSBitmapImageRep(data: exported)?.cgImage), width: 20)
+    }
+
+    @Test("A single-image PNG, TIFF or JPEG is stored byte for byte",
+          arguments: ["png", "tiff", "jpeg"])
+    func singleImageIsStoredUnchanged(format: String) throws {
+      let (type, data): (NSPasteboard.PasteboardType, Data) = switch format {
+      case "png": (.png, try pngData(width: 7, height: 5))
+      case "tiff": (.tiff, try container(.tiff, [(7, 5)]))
+      default: (.jpeg, try jpegData(width: 7, height: 5))
+      }
+      let before = ValidatedImage.canonicalizationsForTesting
+      pasteboard.clearContents()
+      pasteboard.setData(data, forType: type)
+      let item = try #require(checkNow().first)
+      #expect(item.contents.first { $0.type == type.rawValue }?.value == data)
+      #expect(ValidatedImage.canonicalizationsForTesting == before)
+    }
+
+    @Test("An item stored earlier with several pictures previews the first and says other apps may differ")
+    func storedMultiImageItemWarns() async throws {
+      let tiff = try container(.tiff, [(10, 10), (20, 20)], colors: [(1, 0, 0), (0, 1, 0)])
+      let item = imageItem(tiff, type: .tiff)
+      let decorator = HistoryItemDecorator(item)
+      #expect(decorator.imageHasSeveralPictures)
+      #expect(PreviewItemView.severalPicturesNote(true) ==
+              "This image file contains several pictures. Other apps may show a different one.")
+      #expect(PreviewItemView.severalPicturesNote(false) == nil)
+      let preview = try #require(await item.decodedImage(for: .preview))
+      #expect(preview.cgImage.width == 10)
+      // The store is not rewritten.
+      #expect(item.contents.first?.value == tiff)
+    }
+
     // MARK: Second review round: when "too large" is announced
 
     @Test("An oversized copy is announced only if it would otherwise have been saved",
@@ -1139,6 +1211,18 @@ extension SharedStateTests {
       #expect(visionInputs.values.isEmpty)
     }
 
+    @Test("Cancelling a job whose Vision request is registered cancels that request and discards its result")
+    func runningRecognitionIsCancelled() async throws {
+      OCRSetting.preferencesForTesting = try scratchDefaults()
+      let job = TextRecognitionJob()
+      // Called on the recognition queue once the request is registered,
+      // immediately before Vision performs it.
+      HistoryItem.visionInputObserverForTesting = { _ in job.cancel() }
+      let text = await HistoryItem.recognizeText(imageData: try pngData(width: 40, height: 40), fileURL: nil, job: job)
+      #expect(text == nil)
+      #expect(job.cancelledRunningRequestForTesting)
+    }
+
     // MARK: Helpers
 
     private func copyString(_ string: String) {
@@ -1155,7 +1239,9 @@ extension SharedStateTests {
     }
 
     // An image container (TIFF pages, GIF or APNG frames) of solid images.
-    private func container(_ type: UTType, _ sizes: [(Int, Int)]) throws -> Data {
+    private func container(
+      _ type: UTType, _ sizes: [(Int, Int)], colors: [(CGFloat, CGFloat, CGFloat)]? = nil
+    ) throws -> Data {
       let output = NSMutableData()
       let destination = try #require(CGImageDestinationCreateWithData(
         output as CFMutableData, type.identifier as CFString, sizes.count, nil
@@ -1164,12 +1250,13 @@ extension SharedStateTests {
         kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.1],
         kCGImagePropertyPNGDictionary: [kCGImagePropertyAPNGDelayTime: 0.1]
       ]
-      for (width, height) in sizes {
+      for (index, (width, height)) in sizes.enumerated() {
+        let color = colors?[index] ?? (1, 0, 0)
         let context = try #require(CGContext(
           data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
           space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ))
-        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.setFillColor(CGColor(red: color.0, green: color.1, blue: color.2, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         CGImageDestinationAddImage(destination, try #require(context.makeImage()), frame as CFDictionary)
       }
@@ -1266,6 +1353,30 @@ extension SharedStateTests {
     // Every plain-text value on the pasteboard, across all its items.
     private func pastedStrings() -> [String] {
       (pasteboard.pasteboardItems ?? []).compactMap { $0.string(forType: .string) }
+    }
+
+    // A solid green image of the given width.
+    private func expectGreen(
+      _ image: CGImage, width: Int, sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
+      #expect(image.width == width, sourceLocation: sourceLocation)
+      let rep = NSBitmapImageRep(cgImage: image)
+      let color = try #require(rep.colorAt(x: image.width / 2, y: image.height / 2)?.usingColorSpace(.deviceRGB),
+                               sourceLocation: sourceLocation)
+      #expect(color.greenComponent > 0.8 && color.redComponent < 0.2, "\(color)", sourceLocation: sourceLocation)
+    }
+
+    // Runs one production watcher check, waits for any image re-encoding it
+    // started, and returns what it recorded.
+    private func checkNowAwaitingImages() async -> [HistoryItem] {
+      var copies: [HistoryItem] = []
+      clipboard.clearHooks()
+      clipboard.pendingImageCanonicalizationForTesting = nil
+      clipboard.onNewCopy { copies.append($0) }
+      clipboard.checkForChangesInPasteboard()
+      await clipboard.pendingImageCanonicalizationForTesting?.value
+      clipboard.clearHooks()
+      return copies
     }
 
     // Runs one production watcher check now and returns what it recorded.

@@ -13,11 +13,20 @@ import UniformTypeIdentifiers
 //   without decoding any of them, and accepts the source only if it has at
 //   most `maximumImageCount` images, each at most `maximumImagePixels`
 //   pixels, together at most `maximumTotalPixels`.
-// - Decoding produces one image, from the one index `inspect` chose (the
-//   largest image, the first of equal ones: the full-size page of a
-//   multi-resolution TIFF, the first frame of an animation), scaled so its
-//   longest side is at most what the consumer needs (`Purpose`). The original
-//   container is never handed to another decoder.
+// - At capture, a container with more than one image is made unambiguous
+//   (`canonicalForm`): the largest image (the first of equal ones: the
+//   full-size page of a multi-resolution TIFF, the first frame of an APNG or
+//   HEIC sequence) is re-encoded alone, by ImageIO, as a file of the same
+//   type, and only that is stored. A single-image file is stored byte for
+//   byte. Every later consumer (preview, thumbnail, text recognition, Get,
+//   copy-back) then sees the same picture another app sees. GIF, the common
+//   animated format, is not a storable type.
+// - Decoding produces one image, from index 0, the image other apps show
+//   (`NSBitmapImageRep(data:)` and most consumers take the first), scaled so
+//   its longest side is at most what the consumer needs (`Purpose`). For a
+//   new copy that is the only image. An item stored before canonicalisation
+//   may still hold several; the preview says so (`Inspection.imageCount`).
+//   The original container is never handed to another decoder.
 // Decoding is synchronous; callers on the main actor use the `async`
 // variants, which decode on `queue`.
 nonisolated enum ValidatedImage {
@@ -42,7 +51,10 @@ nonisolated enum ValidatedImage {
   // What `inspect` found: the image that will be decoded and its size.
   struct Inspection: Equatable, Sendable {
     let imageCount: Int
+    // The image decoded: always the first.
     let index: Int
+    // The largest image, the first of equal ones: what canonicalisation keeps.
+    let largestIndex: Int
     let width: Int
     let height: Int
     let totalPixels: Int
@@ -66,6 +78,7 @@ nonisolated enum ValidatedImage {
   nonisolated(unsafe) static var maximumImageCountForTesting: Int?
   // Counts every successful decode, so tests can check a path decodes nothing.
   nonisolated(unsafe) static var decodesForTesting = 0
+  nonisolated(unsafe) static var canonicalizationsForTesting = 0
   #endif
 
   static var maximumImageCount: Int {
@@ -104,7 +117,8 @@ nonisolated enum ValidatedImage {
     }
 
     var total = 0
-    var chosen: (index: Int, width: Int, height: Int, pointWidth: Double, pointHeight: Double)?
+    var first: (width: Int, height: Int, pointWidth: Double, pointHeight: Double)?
+    var largest: (index: Int, pixels: Int)?
     for index in 0..<count {
       guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, noCache) as? [CFString: Any],
             let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
@@ -120,20 +134,85 @@ nonisolated enum ValidatedImage {
       guard total <= maximumTotalPixels else {
         return .failure(.totalTooLarge(pixels: total))
       }
-      if chosen.map({ $0.width * $0.height < pixels }) ?? true {
+      if first == nil {
         let dpiWidth = (properties[kCGImagePropertyDPIWidth] as? NSNumber)?.doubleValue ?? 72
         let dpiHeight = (properties[kCGImagePropertyDPIHeight] as? NSNumber)?.doubleValue ?? 72
-        chosen = (index, width, height,
-                  Double(width) * 72 / (dpiWidth > 0 ? dpiWidth : 72),
-                  Double(height) * 72 / (dpiHeight > 0 ? dpiHeight : 72))
+        first = (width, height,
+                 Double(width) * 72 / (dpiWidth > 0 ? dpiWidth : 72),
+                 Double(height) * 72 / (dpiHeight > 0 ? dpiHeight : 72))
+      }
+      if largest.map({ $0.pixels < pixels }) ?? true {
+        largest = (index, pixels)
       }
     }
 
-    guard let chosen else {
+    guard let first, let largest else {
       return .failure(.unreadable)
     }
-    return .success(Inspection(imageCount: count, index: chosen.index, width: chosen.width, height: chosen.height,
-                               totalPixels: total, pointWidth: chosen.pointWidth, pointHeight: chosen.pointHeight))
+    return .success(Inspection(imageCount: count, index: 0, largestIndex: largest.index,
+                               width: first.width, height: first.height, totalPixels: total,
+                               pointWidth: first.pointWidth, pointHeight: first.pointHeight))
+  }
+
+  // What capture stores for one image representation (see `canonicalForm`).
+  enum Canonical: Equatable, Sendable {
+    // One image (or not an image ImageIO reads): stored byte for byte.
+    case unchanged
+    // Several images: only this single-image file of the same type.
+    case replaced(Data)
+    // Several images that couldn't be re-encoded within the limits: the
+    // representation is not stored.
+    case refused
+  }
+
+  // Whether `data` holds more than one image, from its header alone.
+  static func hasSeveralImages(_ data: Data) -> Bool {
+    guard let source = CGImageSourceCreateWithData(data as CFData, noCache) else {
+      return false
+    }
+    return CGImageSourceGetCount(source) > 1
+  }
+
+  // The unambiguous form of `data` for storage: a single image is kept as
+  // is; of several, the largest is re-encoded alone as a file of the same
+  // type, within the pixel and byte limits. Synchronous; capture calls
+  // `canonicalize`, which runs it on `queue`.
+  static func canonicalForm(_ data: Data) -> Canonical {
+    guard let source = CGImageSourceCreateWithData(data as CFData, noCache),
+          CGImageSourceGetCount(source) > 1 else {
+      return .unchanged
+    }
+    guard case .success(let inspection) = inspect(source),
+          let type = CGImageSourceGetType(source) else {
+      return .refused
+    }
+    let output = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, type, 1, nil) else {
+      return .refused
+    }
+    CGImageDestinationAddImageFromSource(destination, source, inspection.largestIndex, nil)
+    guard CGImageDestinationFinalize(destination) else {
+      return .refused
+    }
+    let result = output as Data
+    guard result.count <= ContentLimits.maximumRepresentationBytes,
+          let check = CGImageSourceCreateWithData(result as CFData, noCache),
+          CGImageSourceGetCount(check) == 1 else {
+      return .refused
+    }
+    #if DEBUG
+    canonicalizationsForTesting += 1
+    #endif
+    return .replaced(result)
+  }
+
+  // `canonicalForm(_:)` off the caller's thread.
+  static func canonicalize(_ data: Data) async -> Canonical {
+    await withCheckedContinuation { continuation in
+      queue.async {
+        continuation.resume(returning: canonicalForm(data))
+      }
+    }
   }
 
   // Whether `data` passes `inspect`.

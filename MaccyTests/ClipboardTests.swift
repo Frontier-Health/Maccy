@@ -32,6 +32,9 @@ extension SharedStateTests {
 
     init() throws {
       image = try #require(NSImage(named: "NSInfo"))
+      Defaults[.ignoreRegexp] = []
+      Defaults[.ignoredApps] = []
+      Defaults[.ignoredPasteboardTypes] = []
       Defaults[.ignoreAllAppsExceptListed] = false
       savedCaptureSettings.clear()
       clipboard.syncCaptureState()
@@ -470,6 +473,174 @@ extension SharedStateTests {
       let copied = try #require(copies.first)
       #expect(copies.count == 1)
       #expect(Set(copied.contents.map(\.type)) == [stringType.rawValue])
+    }
+
+    @Test("An invalid stored pattern before a valid pattern blocks matches and unrelated copies")
+    func invalidIgnoreRuleFailsClosed() {
+      Defaults[.ignoreRegexp] = ["[", "secret"]
+      copyString("secret")
+      #expect(checkNow().isEmpty)
+      copyString("ordinary text")
+      #expect(checkNow().isEmpty)
+      #expect(IgnoreRules().hasInvalidStoredRules)
+      Defaults[.ignoreRegexp] = ["secret"]
+      copyString("ordinary text")
+      #expect(checkNow().count == 1)
+      copyString("secret")
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("HTML-only text is decoded and blocked, including entities and split tags")
+    func ignoreHTMLOnly() {
+      Defaults[.ignoreRegexp] = ["secret&token"]
+      copyRichText("<p>sec<b>ret</b>&amp;token</p>", type: .html)
+      #expect(checkNow().isEmpty)
+      copyRichText("<p>ordinary text</p>", type: .html)
+      #expect(checkNow().count == 1)
+    }
+
+    @Test("RTF-only text is blocked")
+    func ignoreRTFOnly() throws {
+      Defaults[.ignoreRegexp] = ["secret"]
+      for (text, expected) in [("secret", 0), ("ordinary text", 1)] {
+        let attributed = NSAttributedString(string: text)
+        let data = try #require(attributed.rtf(from: NSRange(location: 0, length: attributed.length),
+                                              documentAttributes: [:]))
+        pasteboard.declareTypes([.rtf], owner: nil)
+        pasteboard.setData(data, forType: .rtf)
+        #expect(checkNow().count == expected)
+      }
+    }
+
+    @Test("One matching item rejects the entire event, in either order")
+    func ignoreWholeEvent() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      for texts in [["ordinary text", "secret"], ["secret", "ordinary text"]] {
+        let items = texts.map { text in
+          let item = NSPasteboardItem()
+          item.setString(text, forType: .string)
+          return item
+        }
+        pasteboard.clearContents()
+        pasteboard.writeObjects(items)
+        #expect(checkNow().isEmpty)
+      }
+    }
+
+    @Test("A rich representation is checked even alongside harmless plain text and when disabled")
+    func inspectAllRepresentations() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      Defaults[.enabledPasteboardTypes] = [.string]
+      copyString("ordinary text", types: [.string, .html])
+      pasteboard.setString("<p>secret</p>", forType: .html)
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Text cap rejects the whole event rather than truncating, including a padded secret")
+    func ignoreTextLimit() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      copyString(String(repeating: "a", count: IgnoreRules.textLimit))
+      #expect(checkNow().count == 1)
+      copyString(String(repeating: "a", count: IgnoreRules.textLimit + 1))
+      #expect(checkNow().isEmpty)
+      copyString(String(repeating: "a", count: IgnoreRules.textLimit) + "secret")
+      #expect(checkNow().isEmpty)
+      // Count UTF-16 units, not grapheme clusters.
+      copyString(String(repeating: "😀", count: IgnoreRules.textLimit / 2 + 1))
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Text and raw-data caps cover all items and rich-text markup")
+    func ignoreAggregateAndDataLimits() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      let items = (0..<2).map { _ in
+        let item = NSPasteboardItem()
+        item.setString(String(repeating: "a", count: IgnoreRules.textLimit / 2 + 1), forType: .string)
+        return item
+      }
+      pasteboard.clearContents()
+      pasteboard.writeObjects(items)
+      #expect(checkNow().isEmpty)
+      copyRichText("<!--" + String(repeating: "a", count: IgnoreRules.dataLimit) + "--><p>safe</p>", type: .html)
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Unreadable rich text and HTML with document declarations fail closed")
+    func ignoreUnreadableRichText() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      for html in ["<p>unclosed", "<!DOCTYPE html><p>safe</p>", "<p>&unknown;</p>",
+                   "<!DOCTYPE x [<!ENTITY x 'secret'>]><p>&x;</p>"] {
+        copyRichText(html, type: .html)
+        #expect(checkNow().isEmpty)
+      }
+      copyRichText("not RTF", type: .rtf)
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Expensive backtracking fails closed without consuming skip next")
+    func expensiveIgnoreRule() {
+      Defaults[.ignoreRegexp] = ["^(a+)+$"]
+      setCaptureMode(.skipNext)
+      copyString(String(repeating: "a", count: 200) + "!")
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .skipNext)
+    }
+
+    @Test("Raw preference changes invalidate the watcher's cached rules without a notification")
+    func ignoreRuleCacheRefreshes() {
+      let defaults = Defaults.Keys.ignoreRegexp.suite
+      defaults.set(["first"], forKey: Defaults.Keys.ignoreRegexp.name)
+      copyString("first")
+      #expect(checkNow().isEmpty)
+      defaults.set(["second"], forKey: Defaults.Keys.ignoreRegexp.name)
+      copyString("first")
+      #expect(checkNow().count == 1)
+      copyString("second")
+      #expect(checkNow().isEmpty)
+      defaults.set("wrong type", forKey: Defaults.Keys.ignoreRegexp.name)
+      copyString("ordinary text")
+      #expect(checkNow().isEmpty)
+      #expect(IgnoreRules().hasInvalidStoredRules)
+      defaults.set([], forKey: Defaults.Keys.ignoreRegexp.name)
+      copyString("second")
+      #expect(checkNow().count == 1)
+    }
+
+    @Test("Save-time validation preserves the stored rule, then the watcher uses the repaired rule")
+    func validateIgnoreRuleOnSave() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      for draft in ["[", "", String(repeating: "a", count: IgnoreRules.patternLimit + 1)] {
+        #expect(!IgnoreRules.save(draft, replacingAt: 0))
+        #expect(Defaults[.ignoreRegexp] == ["secret"])
+        copyString("secret")
+        #expect(checkNow().isEmpty)
+      }
+      #expect(IgnoreRules.save("token", replacingAt: 0))
+      copyString("token")
+      #expect(checkNow().isEmpty)
+      copyString("secret")
+      #expect(checkNow().count == 1)
+    }
+
+    @Test("An ignored rich-text or multi-item event leaves skip next armed")
+    func ignoredRichCopyDoesNotConsumeSkipNext() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      setCaptureMode(.skipNext)
+      copyRichText("<p>secret</p>", type: .html)
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .skipNext)
+      ignoreWholeEvent()
+      #expect(storedCaptureMode == .skipNext)
+      copyString("ordinary text")
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .capturing)
+      copyString("next copy")
+      #expect(checkNow().count == 1)
+    }
+
+    private func copyRichText(_ text: String, type: NSPasteboard.PasteboardType) {
+      pasteboard.declareTypes([type], owner: nil)
+      pasteboard.setString(text, forType: type)
     }
 
     private var preferences: UserDefaults { clipboard.capturePreferences }

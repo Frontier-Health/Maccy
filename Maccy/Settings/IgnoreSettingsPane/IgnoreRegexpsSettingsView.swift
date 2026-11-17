@@ -4,39 +4,56 @@ import Defaults
 struct IgnoreRegexpsSettingsView: View {
   @Default(.ignoreRegexp) private var ignoredRegexps
 
-  @FocusState private var focus: String.ID?
-  @State private var edit = ""
-  @State private var selection = ""
+  @FocusState private var focus: Int?
+  @State private var drafts: [Int: String] = [:]
+  @State private var selection: Int?
+  @State private var saveFailed = false
 
   var body: some View {
     VStack(alignment: .leading) {
       List(selection: $selection) {
-        ForEach(ignoredRegexps) { regexp in
-          TextField("", text: Binding(
-            get: { regexp },
-            set: {
-              guard !$0.isEmpty, regexp != $0 else { return }
-              edit = $0
-            })
-          ).onSubmit {
-            remove(regexp)
-            ignoredRegexps.append(edit)
-          }.focused($focus, equals: regexp)
+        ForEach(Array(ignoredRegexps.enumerated()), id: \.offset) { index, regexp in
+          HStack {
+            TextField("", text: Binding(
+              get: { drafts[index] ?? regexp },
+              set: { drafts[index] = $0 }
+            ))
+            .onSubmit {
+              saveFailed = !IgnoreRules.save(drafts[index] ?? regexp, replacingAt: index)
+            }
+            .focused($focus, equals: index)
+            if !IgnoreRules.isValid(regexp) {
+              Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .accessibilityLabel(Text("InvalidIgnoreRule", tableName: "IgnoreSettings"))
+            }
+          }.tag(index)
         }
       }.onDeleteCommand {
-        remove(selection)
+        removeSelection()
+      }
+      .onChange(of: ignoredRegexps) {
+        drafts = [:]
       }
 
       ControlGroup {
         Button("", systemImage: "plus") {
-          ignoredRegexps.append("^[a-zA-Z0-9]{50}$")
-          focus = "^[a-zA-Z0-9]{50}$"
+          saveFailed = !IgnoreRules.save("^[a-zA-Z0-9]{50}$")
+          focus = ignoredRegexps.indices.last
         }
         Button("", systemImage: "minus") {
-          remove(selection)
+          removeSelection()
         }
       }.frame(width: 50)
 
+      if saveFailed {
+        Text("InvalidIgnoreRuleDraft", tableName: "IgnoreSettings")
+          .foregroundStyle(.red)
+      }
+      if IgnoreRules().hasInvalidStoredRules {
+        Text("InvalidIgnoreRule", tableName: "IgnoreSettings")
+          .foregroundStyle(.red)
+      }
       Text("IgnoredRegexpsDescription", tableName: "IgnoreSettings")
         .fixedSize(horizontal: false, vertical: true)
         .foregroundStyle(.gray)
@@ -44,10 +61,11 @@ struct IgnoreRegexpsSettingsView: View {
     }.padding()
   }
 
-  private func remove(_ regexp: String?) {
-    guard let regexp else { return }
-
-    ignoredRegexps.removeAll(where: { $0 == regexp })
+  private func removeSelection() {
+    guard let selection, ignoredRegexps.indices.contains(selection) else { return }
+    ignoredRegexps.remove(at: selection)
+    self.selection = nil
+    saveFailed = false
   }
 }
 

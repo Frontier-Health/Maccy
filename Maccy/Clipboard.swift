@@ -13,6 +13,7 @@ class Clipboard {
   private let pasteboard = NSPasteboard.general
 
   private var timer: Timer?
+  private let ignoreRules = IgnoreRules()
 
   private let dynamicTypePrefix = "dyn."
   private let microsoftSourcePrefix = "com.microsoft.ole.source."
@@ -235,14 +236,13 @@ class Clipboard {
     // so it's better to merge all data into a single record.
     // - https://github.com/p0deje/Maccy/issues/78
     // - https://github.com/p0deje/Maccy/issues/472
+    let items = pasteboard.pasteboardItems ?? []
+    guard !ignoreRules.rejects(items) else { return }
+
     var contents = [HistoryItemContent]()
-    pasteboard.pasteboardItems?.forEach({ item in
+    items.forEach({ item in
       var types = Set(item.types)
       if types.contains(.string) && isEmptyString(item) && !richText(item) {
-        return
-      }
-
-      if shouldIgnore(item) {
         return
       }
 
@@ -309,22 +309,6 @@ class Clipboard {
     }
   }
 
-  private func shouldIgnore(_ item: NSPasteboardItem) -> Bool {
-    for regexp in Defaults[.ignoreRegexp] {
-      if let string = item.string(forType: .string) {
-        do {
-          let regex = try NSRegularExpression(pattern: regexp)
-          if regex.numberOfMatches(in: string, range: NSRange(string.startIndex..., in: string)) > 0 {
-            return true
-          }
-        } catch {
-          return false
-        }
-      }
-    }
-    return false
-  }
-
   private func isEmptyString(_ item: NSPasteboardItem) -> Bool {
     guard let string = item.string(forType: .string) else {
       return true
@@ -334,16 +318,14 @@ class Clipboard {
   }
 
   private func richText(_ item: NSPasteboardItem) -> Bool {
-    if let rtf = item.data(forType: .rtf) {
+    if let rtf = item.data(forType: .rtf), rtf.count <= IgnoreRules.dataLimit {
       if let attributedString = NSAttributedString(rtf: rtf, documentAttributes: nil) {
         return !attributedString.string.isEmpty
       }
     }
 
-    if let html = item.data(forType: .html) {
-      if let attributedString = NSAttributedString(html: html, documentAttributes: nil) {
-        return !attributedString.string.isEmpty
-      }
+    if let html = item.data(forType: .html), html.count <= IgnoreRules.dataLimit {
+      return ClipboardHTMLText.extract(html)?.isEmpty == false
     }
 
     return false

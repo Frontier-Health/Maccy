@@ -703,7 +703,10 @@ class HistoryItem {
   // discarded.
   @MainActor
   func loadImageIfNeeded() async {
-    guard case .universalClipboardFile(let url) = imageSource(readableBy: StoragePolicy.currentReadAllowList),
+    // A cancelled caller (for example a preview cleaned up before its task
+    // ran) starts no read.
+    guard !Task.isCancelled,
+          case .universalClipboardFile(let url) = imageSource(readableBy: StoragePolicy.currentReadAllowList),
           universalClipboardFileData?.url != url else {
       return
     }
@@ -754,6 +757,9 @@ class HistoryItem {
   // deleted, its images were cleaned up, or the image may no longer be read.
   @MainActor
   func decodedImage(for purpose: ValidatedImage.Purpose) async -> DecodedImage? {
+    guard !Task.isCancelled else {
+      return nil
+    }
     await loadImageIfNeeded()
     let generation = imageGeneration
     guard !Task.isCancelled, !isDeleted,

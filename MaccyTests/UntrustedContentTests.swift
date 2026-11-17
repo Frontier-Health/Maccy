@@ -426,8 +426,11 @@ extension SharedStateTests {
       #expect(!ValidatedImage.isAcceptable(large))
       #expect(!ValidatedImage.isAcceptable(Data("not an image".utf8)))
 
-      #expect(imageItem(small).imagePixelSize == NSSize(width: 10, height: 10))
-      #expect(await imageItem(small).decodedImage(for: .preview) != nil)
+      let smallItem = imageItem(small)
+      #expect(smallItem.imagePixelSize == NSSize(width: 10, height: 10))
+      #expect(ValidatedImage.cgImage(from: small, for: .preview) != nil)
+      #expect(await ValidatedImage.decode(small, for: .preview) != nil)
+      #expect(await smallItem.decodedImage(for: .preview) != nil)
       let largeItem = imageItem(large)
       #expect(largeItem.imagePixelSize == nil)
       #expect(await largeItem.decodedImage(for: .preview) == nil)

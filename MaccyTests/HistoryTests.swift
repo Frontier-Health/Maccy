@@ -8,6 +8,7 @@ import UserNotifications
 extension SharedStateTests {
   @MainActor
   final class HistoryTests { // swiftlint:disable:this type_body_length
+    let savedStoragePreference = SavedStoragePreference()
     let savedSize = Defaults[.size]
     let savedSortBy = Defaults[.sortBy]
     let savedPinOrder = Defaults[.pinOrder]
@@ -15,7 +16,9 @@ extension SharedStateTests {
     let history = History.shared
 
     init() {
+      Defaults.Keys.enabledPasteboardTypes.suite.removeObject(forKey: StoragePolicy.preferenceKey)
       History.shared.clearAll()
+      History.shared.storageSettingChanged()
       Defaults[.size] = 10
       Defaults[.sortBy] = .firstCopiedAt
       Defaults[.pinOrder] = PinOrder()
@@ -23,6 +26,7 @@ extension SharedStateTests {
     }
 
     deinit {
+      savedStoragePreference.restore()
       Defaults[.size] = savedSize
       Defaults[.sortBy] = savedSortBy
       Defaults[.pinOrder] = savedPinOrder

@@ -228,6 +228,8 @@ extension SharedStateTests {
       savedCaptureSettings.clear()
       clipboard.syncCaptureState()
       clipboard.clearHooks()
+      // clearAll bulk-deletes saved rows only, so save anything pending first.
+      try? Storage.shared.context.save()
       History.shared.clearAll()
     }
 
@@ -468,6 +470,7 @@ extension SharedStateTests {
       item.contents = representations
         .sorted { $0.key.rawValue < $1.key.rawValue }
         .map { HistoryItemContent(type: $0.key.rawValue, value: $0.value) }
+      try? Storage.shared.context.save()
       return item
     }
 

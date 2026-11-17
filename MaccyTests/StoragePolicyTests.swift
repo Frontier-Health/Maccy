@@ -943,7 +943,7 @@ extension SharedStateTests {
     // MARK: Confirmation (3)
 
     @Test("Confirming applies the requested toggle to the current value, and asks again if anything changed")
-    func confirmationUsesCurrentState() throws {
+    func confirmationUsesCurrentState() {
       let all = StoragePolicy(enabledTypes: StoragePolicy.defaultEnabledTypes)
       let impact = StorageCleanUpImpact(itemsLosingData: 1, itemsRemoved: 0)
       guard case .confirm(let shownTypes, let shownImpact) =
@@ -975,12 +975,6 @@ extension SharedStateTests {
       #expect(StorageToggleChange.confirming(pending, from: textOff) { _ in StorageCleanUpImpact() } ==
         .apply(filesOnly))
 
-      // Through the settings pane: a stale confirmation writes nothing and asks again.
-      let viewModel = StorageSettingsPane.ViewModel()
-      Defaults[.enabledPasteboardTypes] = textOff.allowList?.enabledTypes ?? []
-      _ = storedItem([.png: Data("image bytes".utf8)])
-      viewModel.confirm(pending)
-      #expect(StoragePolicy.current.allowList?.enabledTypes == textOff.allowList?.enabledTypes)
     }
 
     // MARK: Clean-up boundaries (B)

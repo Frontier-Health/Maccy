@@ -42,6 +42,7 @@ extension SharedStateTests {
     }
 
     deinit {
+      clipboard.sourceBundleIdentifierForTesting = nil
       Defaults[.enabledPasteboardTypes] = savedEnabledTypes
       savedCaptureSettings.restore()
       Defaults[.ignoreRegexp] = savedIgnoreRegexp
@@ -353,6 +354,56 @@ extension SharedStateTests {
         pasteboard.setString("bar", forType: .string)
       })
       #expect(copies.count == 1)
+    }
+
+    @Test("Allow-list mode rejects a copy from an unknown source app and keeps skip next",
+          arguments: [nil, ""] as [String?])
+    func allowListRejectsUnknownSource(bundleIdentifier: String?) {
+      Defaults[.ignoreAllAppsExceptListed] = true
+      Defaults[.ignoredApps] = ["com.example.listed"]
+      clipboard.sourceBundleIdentifierForTesting = { bundleIdentifier }
+      setCaptureMode(.skipNext)
+
+      copyString("from an app that can't be identified")
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .skipNext)
+
+      // A listed source is accepted again, so it is the one that uses up the skip.
+      clipboard.sourceBundleIdentifierForTesting = { "com.example.listed" }
+      copyString("listed and skipped")
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .capturing)
+
+      copyString("listed and recorded")
+      #expect(checkNow().count == 1)
+
+      // Unknown again once capturing: still nothing recorded.
+      clipboard.sourceBundleIdentifierForTesting = { bundleIdentifier }
+      copyString("unknown again")
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Allow-list mode still rejects a source app that is not listed")
+    func allowListStillRejectsUnlistedSource() {
+      Defaults[.ignoreAllAppsExceptListed] = true
+      Defaults[.ignoredApps] = ["com.example.listed"]
+      clipboard.sourceBundleIdentifierForTesting = { "com.example.other" }
+      copyString("from another app")
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Block-list mode still records a copy from an unknown source app", arguments: [nil, ""] as [String?])
+    func blockListRecordsUnknownSource(bundleIdentifier: String?) {
+      Defaults[.ignoreAllAppsExceptListed] = false
+      Defaults[.ignoredApps] = ["com.example.blocked"]
+      clipboard.sourceBundleIdentifierForTesting = { bundleIdentifier }
+
+      copyString("from an app that can't be identified")
+      #expect(checkNow().count == 1)
+
+      clipboard.sourceBundleIdentifierForTesting = { "com.example.blocked" }
+      copyString("from a blocked app")
+      #expect(checkNow().isEmpty)
     }
 
     @Test("Ignore transient types")

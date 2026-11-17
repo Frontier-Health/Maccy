@@ -13,6 +13,8 @@ class Clipboard {
   // Runs after the pasteboard is inspected and before the copy is skipped or
   // recorded, so tests can change settings at that point.
   var afterInspectionForTesting: (() -> Void)?
+  // Stands in for the frontmost application's bundle identifier.
+  var sourceBundleIdentifierForTesting: (() -> String?)?
   #endif
   var changeCount: Int
 
@@ -28,6 +30,15 @@ class Clipboard {
     .transient
   ]
   private var sourceApp: NSRunningApplication? { NSWorkspace.shared.frontmostApplication }
+  // Best effort: this is the app in front when Maccy notices the copy, not
+  // necessarily the app that wrote it (see the README, "Ignore Copies from
+  // Applications").
+  private var sourceBundleIdentifier: String? {
+    #if DEBUG
+    if let sourceBundleIdentifierForTesting { return sourceBundleIdentifierForTesting() }
+    #endif
+    return sourceApp?.bundleIdentifier
+  }
 
   // Where capture settings live. See CaptureMode.
   let capturePreferences = Defaults.Keys.captureMode.suite
@@ -221,7 +232,7 @@ class Clipboard {
       return
     }
 
-    if let sourceAppBundle = sourceApp?.bundleIdentifier, shouldIgnore(sourceAppBundle) {
+    if shouldIgnore(sourceBundleIdentifier) {
       return
     }
 
@@ -339,7 +350,7 @@ class Clipboard {
       }
     }
 
-    historyItem.application = sourceApp?.bundleIdentifier
+    historyItem.application = sourceBundleIdentifier
     historyItem.regenerateTitle()
 
     onNewCopyHooks.forEach({ $0(historyItem) })
@@ -353,10 +364,18 @@ class Clipboard {
       !types.isDisjoint(with: ignoredTypes)
   }
 
-  private func shouldIgnore(_ sourceAppBundle: String) -> Bool {
+  private func shouldIgnore(_ sourceAppBundle: String?) -> Bool {
     if Defaults[.ignoreAllAppsExceptListed] {
+      // An app that can't be identified can't be on the list.
+      guard let sourceAppBundle, !sourceAppBundle.isEmpty else {
+        logger.info("Copy not recorded: source application unknown and only listed applications are allowed")
+        return true
+      }
+
       return !Defaults[.ignoredApps].contains(sourceAppBundle)
     } else {
+      guard let sourceAppBundle else { return false }
+
       return Defaults[.ignoredApps].contains(sourceAppBundle)
     }
   }

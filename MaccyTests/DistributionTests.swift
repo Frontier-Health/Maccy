@@ -34,8 +34,8 @@ extension SharedStateTests {
       credits.enumerateAttribute(.link, in: NSRange(location: 0, length: credits.length)) { value, _, _ in
         if let link = value as? String { links.append(link) }
       }
-      #expect(!links.isEmpty)
-      #expect(links.allSatisfy { $0 == "https://github.com/Frontier-Health/Maccy" })
+      #expect(links == ["https://github.com/Frontier-Health/Maccy"])
+      #expect(credits.string.contains("Sasha Koss"))
       #expect(Bundle.main.object(forInfoDictionaryKey: "NSHumanReadableCopyright") as? String
               == "Copyright © Alexey Rodionov")
     }
@@ -63,6 +63,11 @@ extension SharedStateTests {
       let frameworks = Bundle.main.privateFrameworksURL
       let names = try frameworks.map { try FileManager.default.contentsOfDirectory(atPath: $0.path) } ?? []
       #expect(!names.contains { $0.localizedCaseInsensitiveContains("sparkle") })
+    }
+
+    @Test("The upstream licence ships in the app bundle")
+    func licenceIsBundled() {
+      #expect(Bundle.main.url(forResource: "LICENSE", withExtension: nil) != nil)
     }
   }
 }

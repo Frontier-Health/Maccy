@@ -8,19 +8,17 @@ class About {
     attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor]
   )
 
-  private var kossCredits: NSMutableAttributedString {
-    let string = NSMutableAttributedString(string: "Kudos to Sasha Koss for help! 🏂",
-                                           attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor])
-    string.addAttribute(.link, value: Self.repositoryURL, range: NSRange(location: 9, length: 10))
-    return string
-  }
+  // Upstream credits are kept as text. The upstream author's personal links are not carried over.
+  private let kossCredits = NSAttributedString(
+    string: "Kudos to Sasha Koss for help! 🏂",
+    attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor]
+  )
 
+  // One link only: the fork has no public website or support channel.
   private var links: NSMutableAttributedString {
-    let string = NSMutableAttributedString(string: "Website│GitHub│Support",
+    let string = NSMutableAttributedString(string: "Source code",
                                            attributes: [NSAttributedString.Key.foregroundColor: NSColor.labelColor])
-    string.addAttribute(.link, value: Self.repositoryURL, range: NSRange(location: 0, length: 7))
-    string.addAttribute(.link, value: Self.repositoryURL, range: NSRange(location: 8, length: 6))
-    string.addAttribute(.link, value: Self.repositoryURL, range: NSRange(location: 15, length: 7))
+    string.addAttribute(.link, value: Self.repositoryURL, range: NSRange(location: 0, length: string.length))
     return string
   }
 

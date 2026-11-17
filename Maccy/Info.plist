@@ -32,7 +32,7 @@
 	<array>
 	<dict>
 		<key>UTTypeIdentifier</key>
-		<string>$(ORG_BUNDLE_ID).pin-reorder</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).pin-reorder</string>
 		<key>UTTypeTagSpecification</key>
 		<dict/>
 		<key>UTTypeDescription</key>

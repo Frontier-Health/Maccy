@@ -2,7 +2,7 @@ import Foundation
 
 nonisolated enum AppIdentity {
   static let bundleIdentifier: String = {
-    guard let identifier = Bundle.main.bundleIdentifier else {
+    guard let identifier = Bundle.main.bundleIdentifier, !identifier.isEmpty else {
       preconditionFailure("The app bundle must have a configured bundle identifier")
     }
     return identifier

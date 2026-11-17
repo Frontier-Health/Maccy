@@ -19,7 +19,13 @@ xcodebuild archive -project Maccy.xcodeproj -scheme Maccy \
 
 Set the two environment variables before this command. Alternatively, pass `-xcconfig "$ORG_IDENTITY_XCCONFIG"` with an externally supplied file defining those same settings. Do not override `PRODUCT_BUNDLE_IDENTIFIER` directly: test bundles and pasteboard declarations must derive from the same app ID. `DEVELOPMENT_TEAM` derives from `ORG_TEAM_ID`.
 
-The app's **Check release identity** build phase runs `scripts/check-release-identity.sh`. Release builds fail if the team is missing or malformed, the bundle ID is a known placeholder or upstream namespace, or the effective app ID or team differs from the organisation settings. This validates configuration, not ownership of an Apple team or identifier. Keep this phase enabled in packaging. Inspect the archived app's `CFBundleIdentifier` and signing team before notarization and distribution.
+The app's **Check release identity** build phase runs `scripts/check-release-identity.sh`. It is skipped only for a plain Debug build. Every other build fails if the team is missing, malformed or upstream's, the bundle ID is a known placeholder or in upstream's namespace, or the effective app ID or team differs from the organisation settings. That covers Release, any custom configuration, and any archive (including an archive of Debug). `scripts/test-check-release-identity.sh` exercises the guard and runs in CI.
+
+Xcode's Profile action builds Release, so it fails locally until `ORG_TEAM_ID` and `ORG_BUNDLE_ID` are set.
+
+The guard validates configuration, not ownership of an Apple team or identifier. Keep the phase enabled in packaging, and have the pipeline check the archived app's `CFBundleIdentifier` and signing team (`codesign -dv`) before notarization and distribution.
+
+Managed preferences are keyed by bundle ID: an MDM custom-settings payload must use the production `ORG_BUNDLE_ID` as its `PayloadType` (preference domain). Profiles written for `org.p0deje.Maccy` do not apply.
 
 CI runs Debug unit tests with `CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=`. These overrides do not require Apple credentials and leave the shared identity settings intact.
 
@@ -46,4 +52,4 @@ CI runs Debug unit tests with `CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=`. These ov
 
 Changing the app ID starts a new preferences domain and sandbox history. No migration from upstream is provided; there are no existing staff installs. Keep the final ID stable after rollout.
 
-All About links point to the fork repository. Upstream copyright and the MIT licence remain intact.
+The About panel has one link, to the fork repository. Upstream's credits remain as text without links. Upstream copyright and the MIT licence remain intact.

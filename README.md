@@ -44,11 +44,8 @@ Maccy works on macOS Sonoma 14 or higher.
 
 ## Install
 
-Download the latest version from the [releases](https://github.com/p0deje/Maccy/releases/latest) page, or use [Homebrew](https://brew.sh/):
-
-```sh
-brew install maccy
-```
+This fork is distributed to staff Macs only through MDM as a signed, notarized package.
+Updates are delivered by MDM; the app has no self-updater.
 
 ## Usage
 

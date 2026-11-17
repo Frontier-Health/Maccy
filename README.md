@@ -18,6 +18,7 @@ Maccy works on macOS Sonoma 14 or higher.
 * [Usage](#usage)
 * [Advanced](#advanced)
   * [Ignore Copied Items](#ignore-copied-items)
+  * [Ignore Copies from Applications](#ignore-copies-from-applications)
   * [Ignore Custom Copy Types](#ignore-custom-copy-types)
   * [Speed up Clipboard Check Interval](#speed-up-clipboard-check-interval)
 * [FAQ](#faq)
@@ -81,6 +82,14 @@ The older `ignoreEvents` and `ignoreOnlyNextEvent` keys still work, but only to 
 You can also click the menu icon with <kbd>OPTION (⌥)</kbd> pressed. To ignore only the next copy, click with <kbd>OPTION (⌥)</kbd> + <kbd>SHIFT (⇧)</kbd> pressed.
 
 If a configuration profile manages `captureMode`, or sets `ignoreEvents` or `ignoreOnlyNextEvent` to true, the settings toggle and the menu icon clicks can't change whether Maccy captures. A managed `captureMode` of `skipNext` is treated as `paused`. While `captureMode` is managed, an `ignoreOnlyNextEvent` set to true also pauses Maccy, and the old keys are not removed for you: delete them with `defaults delete` to resume.
+
+### Ignore Copies from Applications
+
+In Settings › Ignore you can list applications whose copies Maccy ignores, or turn on "Ignore all applications except listed" so that only the listed ones are recorded. With that option on, a copy is not recorded when Maccy can't tell which application it came from (no frontmost application, or one without a bundle identifier).
+
+This is best-effort, not a guarantee. Maccy identifies the source as the application in front when it notices the copy, which happens up to one check interval (0.5 seconds by default) after the copy. That can be the wrong application for background apps, scripts, and copies made just before switching apps. Do not rely on it alone to keep secrets out of the history. Use the ignore patterns in Settings › Ignore and pause capture (see above) as well.
+
+Maccy does not use the `org.nspasteboard.source` pasteboard type to find the source application. It writes that type on its own copies (copying from history, and the search query or OCR text copied from Maccy) and reads it only to recognise those. It is not stored from copies made by other applications.
 
 ### Ignore Custom Copy Types
 

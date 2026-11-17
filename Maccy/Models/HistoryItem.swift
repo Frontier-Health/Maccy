@@ -280,7 +280,7 @@ class HistoryItem {
     do {
       try requestHandler.perform([request])
     } catch {
-      print("Unable to perform the request: \(error).")
+      print("Unable to perform the request: \(Notifier.redacted(error)).")
       return nil
     }
 

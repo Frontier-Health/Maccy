@@ -51,6 +51,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Bridge FloatingPanel via AppDelegate.
     AppState.shared.appDelegate = self
 
+    // Notifications delivered by an earlier session (or an earlier version that put clipboard
+    // text in them) can no longer be matched to items, so drop them before capture starts.
+    Notifier.removeAllDelivered()
+
     Clipboard.shared.onNewCopy { History.shared.add($0) }
     Clipboard.shared.start()
 

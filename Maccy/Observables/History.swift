@@ -179,8 +179,11 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
         item.application = existingHistoryItem.application
       }
       logger.info("Removing duplicate of history item \(item.notificationID)")
+      // The surviving item takes over the duplicate's notification, so a notification already
+      // submitted for the duplicate (for example when copying from history) stays removable.
+      item.notificationID = existingHistoryItem.notificationID
       if let existingDecorator = firstStoredItem(where: { $0.item == existingHistoryItem }) {
-        cleanup(existingDecorator)
+        existingDecorator.cleanupImages()
         allUnpinnedItems.removeAll { $0 == existingDecorator }
         if existingDecorator.isPinned {
           replacedPinnedItem = existingDecorator
@@ -287,7 +290,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
           try context.delete(model: HistoryItemContent.self)
         }
       } catch {
-        logger.error("Failed to clear storage: \(String(reflecting: error))")
+        logger.error("Failed to clear storage: \(Notifier.redacted(error))")
       }
       Storage.shared.context.processPendingChanges()
       try? Storage.shared.context.save()

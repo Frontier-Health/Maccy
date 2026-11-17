@@ -2,6 +2,7 @@ import AppKit
 import Testing
 import Defaults
 import SwiftData
+import UserNotifications
 @testable import Maccy
 
 extension SharedStateTests {
@@ -514,6 +515,173 @@ extension SharedStateTests {
       #expect(!Notifier.identifier(for: first).contains(first.title))
     }
 
+    @Test("Notification submitted for a new copy carries no clipboard content")
+    func submittedNotificationHasNoClipboardContent() async {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+
+      let secret = "hunter2-API-TOKEN-4f9c1e"
+      let item = historyItem(secret)
+      let identifier = Notifier.identifier(for: item)
+      history.add(item)
+      await waitUntil { Notifier.isActive(identifier) }
+      client.resolvePermissions()
+
+      let requests = client.added.filter { $0.identifier == identifier }
+      #expect(requests.count == 1)
+      for request in requests {
+        let content = request.content
+        let everything = [
+          request.identifier,
+          content.title,
+          content.subtitle,
+          content.body,
+          content.categoryIdentifier,
+          content.threadIdentifier,
+          content.summaryArgument,
+          content.targetContentIdentifier ?? "",
+          String(describing: content.userInfo)
+        ]
+        for field in everything {
+          #expect(!field.contains(secret))
+        }
+        #expect(content.userInfo.isEmpty)
+        #expect(content.body == Notifier.makeContent(alertEnabled: true).body)
+      }
+    }
+
+    @Test("Deleting an item removes its delivered notification")
+    func deleteRemovesDeliveredNotification() async {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+
+      let item = historyItem("delivered then deleted")
+      let identifier = Notifier.identifier(for: item)
+      let decorator = history.add(item)
+      await waitUntil { Notifier.isActive(identifier) }
+      client.resolvePermissions()
+      client.resolveAdds()
+      #expect(!client.removed.contains(identifier))
+
+      history.delete(decorator)
+
+      #expect(client.removed.contains(identifier))
+      #expect(!Notifier.isActive(identifier))
+    }
+
+    @Test("Notification is not submitted when its item is deleted before permissions resolve")
+    func deleteBeforePermissionsDropsNotification() async {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+
+      let item = historyItem("deleted before submission")
+      let identifier = Notifier.identifier(for: item)
+      let decorator = history.add(item)
+      await waitUntil { Notifier.isActive(identifier) }
+
+      history.delete(decorator)
+      client.resolvePermissions()
+
+      #expect(client.added.filter { $0.identifier == identifier }.isEmpty)
+    }
+
+    @Test("Notification is removed again when its item is deleted while submission is in flight")
+    func deleteWhileSubmissionInFlightRemovesNotification() async {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+
+      let item = historyItem("deleted in flight")
+      let identifier = Notifier.identifier(for: item)
+      let decorator = history.add(item)
+      await waitUntil { Notifier.isActive(identifier) }
+      client.resolvePermissions()
+      #expect(client.added.filter { $0.identifier == identifier }.count == 1)
+
+      history.delete(decorator)
+      let removalsBeforeCompletion = client.removed.filter { $0 == identifier }.count
+      client.resolveAdds()
+
+      #expect(client.removed.filter { $0 == identifier }.count == removalsBeforeCompletion + 1)
+    }
+
+    @Test("Replacement of a duplicate inherits its notification")
+    func duplicateReplacementInheritsNotification() async {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+
+      let first = historyItem("copied twice")
+      let identifier = Notifier.identifier(for: first)
+      history.add(first)
+      await waitUntil { Notifier.isActive(identifier) }
+      client.resolvePermissions()
+      client.resolveAdds()
+
+      let second = historyItem("copied twice")
+      let secondDecorator = history.add(second)
+
+      #expect(Notifier.identifier(for: second) == identifier)
+      #expect(!client.removed.contains(identifier))
+      #expect(Notifier.isActive(identifier))
+
+      history.delete(secondDecorator)
+
+      #expect(client.removed.contains(identifier))
+    }
+
+    @Test("Clearing all history removes every notification and drops pending ones")
+    func clearAllRemovesNotifications() async {
+      let client = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = client
+      defer { Notifier.client = savedClient }
+
+      let item = historyItem("cleared before submission")
+      let identifier = Notifier.identifier(for: item)
+      history.add(item)
+      await waitUntil { Notifier.isActive(identifier) }
+
+      history.clearAll()
+      client.resolvePermissions()
+
+      #expect(client.removeAllCount >= 1)
+      #expect(client.added.filter { $0.identifier == identifier }.isEmpty)
+    }
+
+    @Test("Errors are logged by domain and code only")
+    func redactedErrorOmitsPayload() {
+      let secret = "patient-record-8841"
+      let error = NSError(
+        domain: "ExampleDomain",
+        code: 1570,
+        userInfo: [
+          NSLocalizedDescriptionKey: "Validation failed for \(secret)",
+          "NSValidationErrorValue": secret,
+          NSUnderlyingErrorKey: NSError(domain: secret, code: 1)
+        ]
+      )
+
+      let logged = Notifier.redacted(error)
+
+      #expect(!logged.contains(secret))
+      #expect(logged == "ExampleDomain code 1570")
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async {
+      for _ in 0..<2000 where !condition() {
+        try? await Task.sleep(for: .milliseconds(1))
+      }
+    }
+
     private func historyItem(_ value: String, persisted: Bool = true) -> HistoryItem {
       let contents = [
         HistoryItemContent(
@@ -531,5 +699,50 @@ extension SharedStateTests {
 
       return item
     }
+  }
+}
+
+/// Records what `Notifier` submits and removes, and lets a test decide when the asynchronous
+/// permission and submission callbacks fire.
+@MainActor
+final class RecordingNotificationClient: NotificationClient {
+  private(set) var added: [UNNotificationRequest] = []
+  private(set) var removed: [String] = []
+  private(set) var removeAllCount = 0
+
+  private var pendingPermissions: [@MainActor (Bool, Bool, Bool) -> Void] = []
+  private var pendingAdds: [@MainActor (Bool) -> Void] = []
+
+  func requestAuthorization() {}
+
+  func permissions(
+    _ completion: @escaping @MainActor (_ authorized: Bool, _ alertEnabled: Bool, _ soundEnabled: Bool) -> Void
+  ) {
+    pendingPermissions.append(completion)
+  }
+
+  func add(_ request: UNNotificationRequest, completion: @escaping @MainActor (_ delivered: Bool) -> Void) {
+    added.append(request)
+    pendingAdds.append(completion)
+  }
+
+  func remove(identifiers: [String]) {
+    removed.append(contentsOf: identifiers)
+  }
+
+  func removeAll() {
+    removeAllCount += 1
+  }
+
+  func resolvePermissions() {
+    let completions = pendingPermissions
+    pendingPermissions = []
+    completions.forEach { $0(true, true, false) }
+  }
+
+  func resolveAdds() {
+    let completions = pendingAdds
+    pendingAdds = []
+    completions.forEach { $0(true) }
   }
 }

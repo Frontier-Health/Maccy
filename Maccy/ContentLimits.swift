@@ -32,6 +32,10 @@ nonisolated enum ContentLimits {
   // 100 megapixels, about 400 MB once decoded: five full-screen screenshots
   // of a 6K display.
   static let defaultMaximumImagePixels = 100_000_000
+  // Metadata the watcher reads besides the stored content (the
+  // org.nspasteboard.source marker): a bundle identifier or Maccy's own
+  // marker, so 1 KiB is ample. Never more than one representation may be.
+  static let defaultMaximumMarkerBytes = 1_024
 
   #if DEBUG
   nonisolated(unsafe) static var maximumRepresentationBytesForTesting: Int?
@@ -53,6 +57,10 @@ nonisolated enum ContentLimits {
     return defaultMaximumCopyBytes
   }
 
+  static var maximumMarkerBytes: Int {
+    min(defaultMaximumMarkerBytes, maximumRepresentationBytes)
+  }
+
   static var maximumImagePixels: Int {
     #if DEBUG
     if let maximumImagePixelsForTesting { return maximumImagePixelsForTesting }
@@ -63,12 +71,15 @@ nonisolated enum ContentLimits {
   // Why a copy was not recorded. Holds only type names and sizes, never content.
   enum Violation: Equatable, CustomStringConvertible {
     case representation(String, bytes: Int)
+    case marker(String, bytes: Int)
     case copy(bytes: Int)
 
     var description: String {
       switch self {
       case .representation(let type, let bytes):
         return "representation \(type) is \(bytes) bytes, limit \(ContentLimits.maximumRepresentationBytes)"
+      case .marker(let type, let bytes):
+        return "marker \(type) is \(bytes) bytes, limit \(ContentLimits.maximumMarkerBytes)"
       case .copy(let bytes):
         return "copy is over \(bytes) bytes, limit \(ContentLimits.maximumCopyBytes)"
       }
@@ -84,6 +95,18 @@ nonisolated enum ContentLimits {
       guard count <= ContentLimits.maximumRepresentationBytes else {
         return .representation(type.rawValue, bytes: count)
       }
+      return addToTotal(count)
+    }
+
+    // Metadata read besides the stored content has a small fixed limit.
+    mutating func addMarker(_ type: NSPasteboard.PasteboardType, bytes count: Int) -> Violation? {
+      guard count <= ContentLimits.maximumMarkerBytes else {
+        return .marker(type.rawValue, bytes: count)
+      }
+      return addToTotal(count)
+    }
+
+    private mutating func addToTotal(_ count: Int) -> Violation? {
       bytes += count
       guard bytes <= ContentLimits.maximumCopyBytes else {
         return .copy(bytes: bytes)

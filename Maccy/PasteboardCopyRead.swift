@@ -13,9 +13,20 @@ import AppKit
 //    total of the copy) as soon as it arrives, before it is decoded, trimmed
 //    or scanned. Nothing more is read once a limit is passed.
 // 3. Those bytes are kept and reused: for the blank-text check, the ignore
-//    rules (`data(item:type:)`) and the record. The ignore rules read later
+//    rules (`lookup(item:type:)`) and the record. The ignore rules read later
 //    items' values themselves, within their own limits, and only when there
 //    are rules.
+// 4. Metadata the watcher needs that is not stored, the
+//    org.nspasteboard.source marker, is part of the same snapshot: planned
+//    from type names (the first item that offers it), read once, checked
+//    against `ContentLimits.maximumMarkerBytes` (as is the stored
+//    `x.nspasteboard.ModifiedType` marker), and afterwards compared only as
+//    these bytes (`isMaccySource`).
+//
+// Apart from this reader and the ignore-rule reader, the watcher reads no
+// pasteboard data: no `string(forType:)`, `data(forType:)` or
+// `propertyList(forType:)` on the pasteboard or its items. The CI guard
+// (`tools/check-rich-text-importers.py`) enforces that for Clipboard.swift.
 //
 // For plain text, `NSPasteboard.string(forType:)` joins every item's string
 // with newlines; Maccy keeps only the first item's, so it never doubles text
@@ -35,12 +46,26 @@ struct PasteboardCopyRead {
   nonisolated(unsafe) static var decodesForTesting = 0
   #endif
 
+  // What the snapshot holds for one (item, type) pair. "Not read" (never
+  // planned, or after a limit stopped reading) is distinct from "read and
+  // the app supplied nothing", so a caller never fetches a planned value a
+  // second time.
+  enum Lookup: Equatable {
+    case notRead
+    case unavailable
+    case data(Data)
+  }
+
   // Markers stored empty whatever the copying app wrote
   // (`StorageAllowList.admission`): their data is never read.
   private static let markersStoredEmpty: Set<NSPasteboard.PasteboardType> = [.fromMaccy, .universalClipboard]
+  // Markers whose bytes are read; they get the small marker limit.
+  private static let markersRead: Set<NSPasteboard.PasteboardType> = [.modified, .source]
 
   // The planned representations, in order, with the bytes read.
   private(set) var values: [(key: Key, data: Data?)] = []
+  // The first item's org.nspasteboard.source bytes, if any item offers it.
+  private(set) var source: Data?
   // Values of a type a later item also offered, which are not read.
   private(set) var duplicatesDropped = 0
   // Set when a limit was passed; reading stopped there.
@@ -67,32 +92,72 @@ struct PasteboardCopyRead {
     return (keys, duplicates)
   }
 
+  // The unstored metadata to read, from type names alone: the first item
+  // that offers org.nspasteboard.source.
+  static func planSource(_ itemTypes: [[NSPasteboard.PasteboardType]]) -> Key? {
+    itemTypes.firstIndex { $0.contains(.source) }.map { Key(item: $0, type: .source) }
+  }
+
   static func read(_ items: [NSPasteboardItem], storing allowList: StorageAllowList) -> PasteboardCopyRead {
     var copy = PasteboardCopyRead()
-    let planned = plan(items.map(\.types), storing: allowList)
+    let itemTypes = items.map(\.types)
+    let planned = plan(itemTypes, storing: allowList)
     copy.duplicatesDropped = planned.duplicatesDropped
     var tally = ContentLimits.Tally()
+
+    func readChecked(_ key: Key) -> (data: Data?, violation: ContentLimits.Violation?) {
+      let data = items[key.item].data(forType: key.type)
+      #if DEBUG
+      readsForTesting += 1
+      #endif
+      let count = data?.count ?? 0
+      let exceeded = markersRead.contains(key.type)
+        ? tally.addMarker(key.type, bytes: count)
+        : tally.add(key.type, bytes: count)
+      return (data, exceeded)
+    }
+
+    // The marker first: it is small, and a copy whose marker is over its
+    // limit is refused before any content is read.
+    if let sourceKey = planSource(itemTypes) {
+      let read = readChecked(sourceKey)
+      if let exceeded = read.violation {
+        copy.violation = exceeded
+        return copy
+      }
+      copy.source = read.data
+    }
+
     for key in planned.keys {
       guard !markersStoredEmpty.contains(key.type) else {
         copy.values.append((key: key, data: nil))
         continue
       }
-      let data = items[key.item].data(forType: key.type)
-      #if DEBUG
-      readsForTesting += 1
-      #endif
-      if let exceeded = tally.add(key.type, bytes: data?.count ?? 0) {
+      let read = readChecked(key)
+      if let exceeded = read.violation {
         copy.violation = exceeded
         return copy
       }
-      copy.values.append((key: key, data: data))
+      copy.values.append((key: key, data: read.data))
     }
     return copy
+  }
+
+  // Whether the source marker says Maccy wrote this copy, from the snapshot.
+  var isMaccySource: Bool {
+    source == Data(NSPasteboard.PasteboardType.fromMaccy.rawValue.utf8)
   }
 
   // The bytes read for one representation, if it was planned.
   func data(item: Int, type: NSPasteboard.PasteboardType) -> Data? {
     values.first { $0.key == Key(item: item, type: type) }?.data
+  }
+
+  // What the snapshot holds for one representation (see `Lookup`).
+  func lookup(item: Int, type: NSPasteboard.PasteboardType) -> Lookup {
+    let key = Key(item: item, type: type)
+    guard let entry = values.first(where: { $0.key == key }) else { return .notRead }
+    return entry.data.map(Lookup.data) ?? .unavailable
   }
 
   // What the record stores, from the bytes already read. An item whose plain

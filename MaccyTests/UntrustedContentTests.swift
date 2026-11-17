@@ -431,6 +431,11 @@ extension SharedStateTests {
       #expect(ValidatedImage.cgImage(from: small, for: .preview) != nil)
       #expect(await ValidatedImage.decode(small, for: .preview) != nil)
       #expect(await smallItem.decodedImage(for: .preview) != nil)
+      // DIAGNOSTIC (temporary): the same through a temporary item.
+      let temporary = await imageItem(small).decodedImage(for: .preview)
+      let temporaryTrace = HistoryItem.decodedImageTraceForTesting
+      print("DIAGNOSTIC temporary item trace: \(temporaryTrace)")
+      #expect(temporary != nil, "\(temporaryTrace)")
       let largeItem = imageItem(large)
       #expect(largeItem.imagePixelSize == nil)
       #expect(await largeItem.decodedImage(for: .preview) == nil)
@@ -658,10 +663,11 @@ extension SharedStateTests {
     @Test("Invisible and direction-changing characters in the plain text are flagged")
     func invisibleCharactersAreFlagged() {
       for text in ["rm\u{200B} -rf", "abc\u{202E}def", "a\u{2066}b\u{2069}", "a\u{00AD}b", "a\u{0007}b",
-                   "a\rb", "a\u{0085}b", "\u{FEFF}text", "tag\u{E0041}"] {
+                   "a\u{0085}b", "\u{FEFF}text", "tag\u{E0041}"] {
         #expect(RichTextImport.containsInvisibleOrDirectionalScalars(text), "\(text.unicodeScalars.map(\.value))")
       }
-      for text in ["plain text", "tab\tand\nnewline", "👩‍💻 developer", "naïve café", "مرحبا"] {
+      for text in ["plain text", "tab\tand\nnewline", "👩‍💻 developer", "naïve café", "مرحبا",
+                   "windows\r\nline endings\r\n", "old mac\rline"] {
         #expect(!RichTextImport.containsInvisibleOrDirectionalScalars(text), "\(text)")
       }
       let item = HistoryItem(contents: [stringContent("Pay \u{202E}001 ecilA")])
@@ -875,6 +881,187 @@ extension SharedStateTests {
       })
     }
 
+    // MARK: Second review round: one bounded snapshot
+
+    @Test("The source marker is read once, inside the bounded snapshot and within the marker limit")
+    func sourceMarkerIsBounded() throws {
+      let notifications = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = notifications
+      defer { Notifier.client = savedClient }
+      ContentLimits.maximumRepresentationBytesForTesting = 100
+
+      // The reviewer's input: a normal string and a lazy 1,000-byte marker,
+      // with skip next armed.
+      clipboard.perform(.toggleSkipNext)
+      let provider = CountingDataProvider([
+        .string: Data("hello".utf8),
+        .source: Data(repeating: 0x61, count: 1_000)
+      ])
+      let item = NSPasteboardItem()
+      item.setDataProvider(provider, forTypes: [.string, .source])
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+      let reads = PasteboardCopyRead.readsForTesting
+      #expect(checkNow().isEmpty)
+      // Only the marker was read, by the snapshot, and it stopped there.
+      #expect(PasteboardCopyRead.readsForTesting == reads + 1)
+      #expect(provider.count(for: .source) == 1)
+      #expect(provider.count(for: .string) == 0)
+      // The skip is still armed, and a skipped copy is never announced.
+      #expect(CaptureMode.effective(in: clipboard.capturePreferences) == .skipNext)
+      notifications.resolvePermissions()
+      #expect(notifications.added.isEmpty)
+      clipboard.perform(.toggleSkipNext)
+    }
+
+    @Test("Skip next tells Maccy's own copies from the snapshot's marker bytes",
+          arguments: [(true, false), (false, true)])
+    func skipNextUsesSnapshotMarker(fromMaccy: Bool, consumesSkip: Bool) throws {
+      clipboard.perform(.toggleSkipNext)
+      let marker = fromMaccy ? NSPasteboard.PasteboardType.fromMaccy.rawValue : "com.example.editor"
+      let provider = CountingDataProvider([.string: Data("hello".utf8), .source: Data(marker.utf8)])
+      let item = NSPasteboardItem()
+      item.setDataProvider(provider, forTypes: [.string, .source])
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+      let reads = PasteboardCopyRead.readsForTesting
+      #expect(checkNow().isEmpty)
+      #expect(PasteboardCopyRead.readsForTesting == reads + 2)
+      #expect(provider.count(for: .source) == 1)
+      #expect(provider.count(for: .string) == 1)
+      let mode = CaptureMode.effective(in: clipboard.capturePreferences)
+      #expect(mode == (consumesSkip ? .capturing : .skipNext))
+      if mode == .skipNext {
+        clipboard.perform(.toggleSkipNext)
+      }
+    }
+
+    @Test("A planned value the app didn't supply is not fetched again by the ignore rules")
+    func unavailableValueIsNotRefetched() throws {
+      Defaults[.ignoreRegexp] = ["^never-matches$"]
+      // The provider supplies nothing for the string it advertises.
+      let provider = CountingDataProvider([.html: Data("<p>x</p>".utf8)])
+      let item = NSPasteboardItem()
+      item.setDataProvider(provider, forTypes: [.string, .html])
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+      // An advertised but undelivered value can't be checked, so the rules refuse it.
+      #expect(checkNow().isEmpty)
+      #expect(provider.count(for: .string) == 1)
+      #expect(provider.count(for: .html) == 1)
+    }
+
+    @Test("A secret in a later pasteboard item rejects the whole copy through the watcher")
+    func secretInLaterItemIsRejected() throws {
+      Defaults[.ignoreRegexp] = ["sk-[A-Z0-9]{8,}"]
+      let first = NSPasteboardItem()
+      first.setString("meeting notes", forType: .string)
+      let later = NSPasteboardItem()
+      later.setString("token sk-ABCDEF123456", forType: .string)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([first, later])
+      #expect(checkNow().isEmpty)
+
+      // Without the secret the same shape is recorded, as the first item's text.
+      let clean = NSPasteboardItem()
+      clean.setString("other notes", forType: .string)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([NSPasteboardItem().withString("meeting notes"), clean])
+      let recorded = try #require(checkNow().first)
+      #expect(stringValues(recorded) == ["meeting notes"])
+    }
+
+    // MARK: Second review round: when "too large" is announced
+
+    @Test("An oversized copy is announced only if it would otherwise have been saved",
+          arguments: ["plain", "skip next armed", "ignore rule configured", "invalid ignore rule"])
+    func copyTooLargeNotification(setting: String) throws {
+      let notifications = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = notifications
+      defer { Notifier.client = savedClient }
+      ContentLimits.maximumRepresentationBytesForTesting = 100
+      switch setting {
+      case "skip next armed": clipboard.perform(.toggleSkipNext)
+      case "ignore rule configured": Defaults[.ignoreRegexp] = ["^password"]
+      case "invalid ignore rule": Defaults[.ignoreRegexp] = ["("]
+      default: break
+      }
+
+      copyString(String(repeating: "a", count: 101))
+      #expect(checkNow().isEmpty)
+      notifications.resolvePermissions()
+      #expect(notifications.added.count == (setting == "plain" ? 1 : 0))
+      if setting == "skip next armed" {
+        #expect(CaptureMode.effective(in: clipboard.capturePreferences) == .skipNext)
+        clipboard.perform(.toggleSkipNext)
+      }
+    }
+
+    // MARK: Second review round: formatting allow-list
+
+    @Test("Formatting outside the allow-list gets the neutral note even with equal text",
+          arguments: [
+            ("Do not pay Mallory 100", "<p><font color=white>Do not </font>pay Mallory 100</p>"),
+            ("Pay Alice 100", "<bdo dir=rtl>Pay Alice 100</bdo>"),
+            ("Pay Alice 100", "<p class=\"x\">Pay Alice 100</p>"),
+            ("Pay Alice 100", "<p>Pay Alice <sup>100</sup></p>"),
+            ("Pay Alice 100", "<p dir=\"rtl\">Pay Alice 100</p>"),
+            ("Pay Alice 100", "<p onclick=\"x()\">Pay Alice 100</p>"),
+            ("Pay Alice 100", "<!-- note --><p>Pay Alice 100</p>")
+          ])
+    func htmlOutsideAllowListIsNoted(plain: String, html: String) throws {
+      let decorator = History.shared.added(try #require(copyPlainAndHTML(plain, html)))
+      #expect(decorator.formattedTextComparison == .renderingNotChecked)
+      #expect(!PreviewItemView.formattedTextNoteIsWarning(.renderingNotChecked))
+    }
+
+    @Test("Allow-listed HTML with equal text shows nothing")
+    func allowListedHTMLShowsNothing() throws {
+      let html = "<meta charset=\"utf-8\"><!--StartFragment--><div><h1>Pay</h1><p>Alice <b>and</b> <i>Bob</i> " +
+        "<a href=\"https://example.invalid\">100</a></p><table><tbody><tr><td colspan=\"2\">x</td></tr></tbody>" +
+        "</table></div><!--EndFragment-->"
+      let decorator = History.shared.added(try #require(copyPlainAndHTML("Pay Alice and Bob 100 x", html)))
+      #expect(decorator.formattedTextComparison == .noTextDifference)
+    }
+
+    @Test("RTF with a colour, tiny or shifted text gets the neutral note; fonts, bold and underline don't")
+    func rtfOutsideAllowListIsNoted() throws {
+      func comparison(_ rtf: String, plain: String) throws -> FormattedTextComparison {
+        let item = NSPasteboardItem()
+        item.setString(plain, forType: .string)
+        item.setData(Data(rtf.utf8), forType: .rtf)
+        pasteboard.clearContents()
+        pasteboard.writeObjects([item])
+        return History.shared.added(try #require(checkNow().first)).formattedTextComparison
+      }
+      let header = #"{\rtf1\ansi\deff0{\fonttbl{\f0 Helvetica;}}{\colortbl;\red255\green255\blue255;}\f0\fs24 "#
+      // The reviewer's input: white on "Do not ", default on the rest.
+      #expect(try comparison(header + #"{\cf1 Do not }pay Mallory 100}"#, plain: "Do not pay Mallory 100")
+              == .renderingNotChecked)
+      #expect(try comparison(header + #"{\cb1 Pay} Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"{\fs4 Pay} Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"Pay Alice {\super 100}}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"Pay {\strike Alice} 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"\rtlpar Pay Alice 100}"#, plain: "Pay Alice 100") == .renderingNotChecked)
+      #expect(try comparison(header + #"Pay {\b Alice} {\i\ul 100}}"#, plain: "Pay Alice 100") == .noTextDifference)
+    }
+
+    @Test("Windows and old Mac line endings don't warn, and are pasted unchanged")
+    func carriageReturnsDontWarn() throws {
+      copyString("line one\r\nline two\rline three")
+      let decorator = History.shared.added(try #require(checkNow().first))
+      #expect(!decorator.textWarnings.hasInvisibleCharacters)
+      #expect(stringValues(decorator.item) == ["line one\r\nline two\rline three"])
+    }
+
+    @Test("The neutral note is a compact tag with the sentence as its help text")
+    func neutralNoteIsATag() {
+      #expect(PreviewItemView.formattedTagLabel == "Formatted")
+      #expect(PreviewItemView.formattedTextNote(.renderingNotChecked) == "Formatted paste was not checked against this text.")
+    }
+
     // MARK: Review round: text recognition
 
     @Test("Queued text recognition stops before it starts once recognition is turned off or cancelled",
@@ -1064,6 +1251,13 @@ final class ThreadRecorder: @unchecked Sendable {
   }
 
   var values: [Bool] { lock.withLock { recorded } }
+}
+
+extension NSPasteboardItem {
+  func withString(_ string: String) -> NSPasteboardItem {
+    setString(string, forType: .string)
+    return self
+  }
 }
 
 // Supplies pasteboard data on request and counts each request.

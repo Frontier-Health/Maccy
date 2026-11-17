@@ -108,6 +108,13 @@ final class IgnoreRules {
     return invalid
   }
 
+  // Whether any rule is configured, valid or not: a copy is then checked
+  // against the rules (or refused because they can't be read).
+  var hasRules: Bool {
+    refresh()
+    return invalid || !expressions.isEmpty
+  }
+
   private func refresh() {
     let raw = preferences.object(forKey: Defaults.Keys.ignoreRegexp.name)
     let stored: Stored = if let raw {
@@ -135,12 +142,16 @@ final class IgnoreRules {
     }
   }
 
-  // `read` returns a representation's bytes: the watcher passes the bytes it
-  // already read for a copy, so nothing is read twice, and reads the rest
-  // (later items' values of a type) only here, within the limits below.
+  // `read` returns what the watcher's snapshot holds for a representation
+  // (`PasteboardCopyRead.lookup`). A value the snapshot read is reused, even
+  // when the app supplied nothing for it, so nothing is fetched twice; only
+  // values the snapshot did not read (later items' values of a type) are
+  // read here, within the limits below.
   func rejects(
     _ items: [NSPasteboardItem],
-    reading read: (_ itemIndex: Int, _ type: NSPasteboard.PasteboardType) -> Data? = { _, _ in nil }
+    reading read: (_ itemIndex: Int, _ type: NSPasteboard.PasteboardType) -> PasteboardCopyRead.Lookup = { _, _ in
+      .notRead
+    }
   ) -> Bool {
     lastRejection = rejection(for: items, reading: read)
     guard let lastRejection else { return false }
@@ -150,7 +161,7 @@ final class IgnoreRules {
 
   private func rejection(
     for items: [NSPasteboardItem],
-    reading read: (Int, NSPasteboard.PasteboardType) -> Data?
+    reading read: (Int, NSPasteboard.PasteboardType) -> PasteboardCopyRead.Lookup
   ) -> Rejection? {
     refresh()
     guard !invalid else { return .invalidStoredRule }
@@ -162,8 +173,13 @@ final class IgnoreRules {
     var remainingRawRTF = Self.rawRTFDataLimit
     for (itemIndex, item) in items.enumerated() {
       for type in Self.inspectedTypes where item.types.contains(type) {
+        let delivered: Data? = switch read(itemIndex, type) {
+        case .data(let data): data
+        case .unavailable: nil
+        case .notRead: item.data(forType: type)
+        }
         // An advertised but undelivered representation cannot be verified.
-        guard let data = read(itemIndex, type) ?? item.data(forType: type) else { return .undecodable }
+        guard let data = delivered else { return .undecodable }
         let charged: Int
         if type == .rtf {
           guard data.count <= remainingRawRTF else { return .rtfDataLimit }

@@ -95,14 +95,17 @@ struct PreviewItemView: View {
         if Self.formattedTextNoteIsWarning(item.formattedTextComparison) {
           warning(note)
         } else {
-          Label {
-            Text(note)
-              .fixedSize(horizontal: false, vertical: true)
-          } icon: {
-            Image(systemName: "info.circle")
-              .foregroundStyle(.secondary)
-          }
-          .padding(.top, 6)
+          // Expected on most styled web and Office copies, so a compact,
+          // low-key tag with the sentence as help text, not a warning.
+          Text(Self.formattedTagLabel)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .overlay(Capsule().stroke(.secondary.opacity(0.5), lineWidth: 1))
+            .help(note)
+            .accessibilityLabel(Text(note))
+            .padding(.top, 6)
         }
       }
 
@@ -179,6 +182,11 @@ struct PreviewItemView: View {
         .foregroundStyle(.orange)
     }
     .padding(.top, 6)
+  }
+
+  // The tag shown for `.renderingNotChecked`; its help text is the note.
+  static var formattedTagLabel: String {
+    NSLocalizedString("FormattedTag", tableName: "PreviewItemView", value: "Formatted", comment: "")
   }
 
   // English only; other locales fall back to it.

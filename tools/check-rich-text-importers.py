@@ -14,6 +14,10 @@ Clipboard content is untrusted (A7).
   checked first); `NSImage(data:)`, `NSImage(contentsOf:)`,
   `NSBitmapImageRep(data:)`, `CGImageSourceCreate...` and Vision handlers
   taking data or a URL are rejected elsewhere.
+- The clipboard watcher (Maccy/Clipboard.swift) reads no pasteboard data
+  itself (`string(forType:)`, `data(forType:)`, `propertyList(forType:)`,
+  `readObjects`): every value it uses comes from the bounded snapshot in
+  Maccy/PasteboardCopyRead.swift or from the ignore-rule reader.
 
 Each file is scanned as a whole with comments and string literals blanked
 out (line breaks kept, so a call split over several lines is still seen and
@@ -32,6 +36,9 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / 'tools/importer-guard-fixtures'
 RICH_TEXT_FILE = 'Maccy/RichTextImport.swift'
 IMAGE_FILE = 'Maccy/ValidatedImage.swift'
+WATCHER_FILE = 'Maccy/Clipboard.swift'
+PASTEBOARD_READ = re.compile(
+    r'\.\s*(?:string|data|propertyList)\s*\(\s*forType\s*:|\breadObjects\s*\(')
 
 DOCUMENT_ARGUMENTS = r'(?:data|url|html|docFormat|rtf|rtfd|rtfdFileWrapper|contentsOf|path|fileURL)'
 ATTRIBUTED_INIT = re.compile(
@@ -177,6 +184,9 @@ def check(relative, source):
         for pattern in IMAGE_DECODERS:
             for match in pattern.finditer(code):
                 report(match, f'image decoded outside {IMAGE_FILE}')
+    if relative == WATCHER_FILE:
+        for match in PASTEBOARD_READ.finditer(code):
+            report(match, 'pasteboard read in the watcher outside the bounded snapshot')
     return problems
 
 
@@ -215,7 +225,8 @@ def main():
         print('\n'.join(problems))
         sys.exit(1)
     print(f'No WebKit, Quick Look, PDFKit or unchecked document import in app code; '
-          f'documents imported only in {RICH_TEXT_FILE} (explicit RTF), images decoded only in {IMAGE_FILE}')
+          f'documents imported only in {RICH_TEXT_FILE} (explicit RTF), images decoded only in {IMAGE_FILE}; '
+          f'no direct pasteboard reads in {WATCHER_FILE}')
 
 
 if __name__ == '__main__':

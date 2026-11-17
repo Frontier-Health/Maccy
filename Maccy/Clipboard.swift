@@ -242,14 +242,23 @@ class Clipboard {
     // A copy over a limit is not recorded at all, and doesn't use up skip next.
     if let violation = copy.violation {
       logger.warning("Copy not recorded: \(violation.description)")
-      Notifier.notifyCopyTooLarge()
+      if shouldNotifyCopyTooLarge(captureMode: captureMode, isFromMaccy: isFromMaccy || copy.isMaccySource) {
+        Notifier.notifyCopyTooLarge()
+      }
       return
     }
 
     // Ignore rules read the text of the string, file URL, RTF and HTML
     // representations of every item whatever the storage setting, without
-    // storing it, reusing the bytes already read.
-    guard !ignoreRules.rejects(items, reading: copy.data(item:type:)) else { return }
+    // storing it, reusing what the snapshot already read.
+    let rejected = ignoreRules.rejects(items, reading: copy.lookup(item:type:))
+
+    // ---- End of pasteboard reads. ----
+    // Nothing below reads the pasteboard or its items: every later decision
+    // uses `copy` (the bounded snapshot) and `isFromMaccy` (type names).
+    // The change-count re-check (A8, #11) belongs immediately here.
+
+    guard !rejected else { return }
 
     let contents = copy.contents(storing: allowList)
     let duplicatesDropped = copy.duplicatesDropped + copy.duplicateFileURLs
@@ -274,12 +283,11 @@ class Clipboard {
       // the pasteboard was inspected, so whether the copy would be recorded
       // is decided again with the setting read now: a copy `add` would refuse
       // doesn't use up the skip.
-      let isMaccySource = pasteboard.string(forType: .source) == NSPasteboard.PasteboardType.fromMaccy.rawValue
       guard let currentAllowList = StoragePolicy.current.allowList,
             currentAllowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
         return
       }
-      if !isFromMaccy && !isMaccySource {
+      if !isFromMaccy && !copy.isMaccySource {
         CaptureMode.consumeSkip(in: capturePreferences)
         // The watcher's own write is not an uncertain transition, so the copy
         // after the skipped one is recorded.
@@ -303,6 +311,18 @@ class Clipboard {
     historyItem.regenerateTitle()
 
     onNewCopyHooks.forEach({ $0(historyItem) })
+  }
+
+  // Whether to tell the user an oversized copy was not saved. Only when Maccy
+  // can establish the copy would otherwise have been saved: capture is on
+  // (paused and uncertain changes, ignored apps and ignored, concealed,
+  // transient or auto-generated types have returned before this), it is not
+  // the copy skip next is armed for (whose skip stays armed), it is not
+  // Maccy's own write, and no ignore rule is configured, since the rules
+  // can't be evaluated on a copy that wasn't read in full. Otherwise it is
+  // only logged.
+  private func shouldNotifyCopyTooLarge(captureMode: CaptureMode, isFromMaccy: Bool) -> Bool {
+    captureMode == .capturing && !isFromMaccy && !ignoreRules.hasRules
   }
 
   private func shouldIgnore(_ types: Set<NSPasteboard.PasteboardType>, storing allowList: StorageAllowList) -> Bool {

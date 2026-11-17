@@ -43,15 +43,73 @@ enum RichTextImport {
     return rtfText(data)
   }
 
+  // The text of an RTF document and whether its formatting may make a
+  // renderer show it differently (see `rtfFormattingMayRenderDifferently`),
+  // from one import; nil if it is too large or unreadable.
+  static func inspectRTF(_ data: Data) -> (text: String, mayRenderDifferently: Bool)? {
+    guard rtfIsImportable(data) else {
+      return nil
+    }
+
+    #if DEBUG
+    rtfImportsForTesting += 1
+    #endif
+    guard let document = rtfDocument(data) else {
+      return nil
+    }
+    return (document.string, rtfMayRenderDifferently(data) || rtfFormattingMayRenderDifferently(document))
+  }
+
   // AppKit's RTF reader, told the data is RTF. Unbounded: callers bound the
   // input first.
   nonisolated static func rtfText(_ data: Data) -> String? {
-    let document = try? NSAttributedString(
+    rtfDocument(data)?.string
+  }
+
+  private nonisolated static func rtfDocument(_ data: Data) -> NSAttributedString? {
+    try? NSAttributedString(
       data: data,
       options: [.documentType: NSAttributedString.DocumentType.rtf],
       documentAttributes: nil
     )
-    return document?.string
+  }
+
+  // An allow-list of formatting that cannot hide, recolour or reorder text:
+  // fonts (bold and italic are font traits) of at least `minimumRTFPointSize`,
+  // underline, links, paragraph styles with the natural writing direction
+  // (alignment, spacing and tabs), and zero kerning. Anything else, among
+  // them any explicit foreground or background colour, a smaller font, a
+  // writing direction or bidi embedding, attachments, superscript or a
+  // baseline offset, strikethrough, outlines, shadows and expansion, can make
+  // what is rendered differ from the text, so it is reported. Whether a
+  // colour contrasts with the background the paste lands on can't be known.
+  nonisolated static let minimumRTFPointSize: CGFloat = 6
+
+  nonisolated static func rtfFormattingMayRenderDifferently(_ document: NSAttributedString) -> Bool {
+    var found = false
+    document.enumerateAttributes(in: NSRange(location: 0, length: document.length)) { attributes, _, stop in
+      for (key, value) in attributes where !isPlainRTFAttribute(key, value) {
+        found = true
+        stop.pointee = true
+        return
+      }
+    }
+    return found
+  }
+
+  private nonisolated static func isPlainRTFAttribute(_ key: NSAttributedString.Key, _ value: Any) -> Bool {
+    switch key {
+    case .font:
+      return ((value as? NSFont)?.pointSize ?? 0) >= minimumRTFPointSize
+    case .paragraphStyle:
+      return (value as? NSParagraphStyle)?.baseWritingDirection == .natural
+    case .underlineStyle, .underlineColor, .link, .ligature:
+      return true
+    case .kern:
+      return (value as? NSNumber)?.doubleValue == 0
+    default:
+      return false
+    }
   }
 
   // The text of an HTML document, without rendering it or loading anything
@@ -85,8 +143,9 @@ enum RichTextImport {
   // Whether `text` holds a character that is invisible or changes text
   // direction: zero-width and other format controls (Unicode category Cf,
   // which includes the bidi embeddings, overrides and isolates), and C0 and
-  // C1 controls other than tab and line feed. A zero-width joiner between two
-  // emoji (as in 👩‍💻) is part of the emoji, not hidden.
+  // C1 controls other than tab and line feed. A carriage return is an
+  // ordinary line separator (Windows `\r\n`, old Mac `\r`). A zero-width
+  // joiner between two emoji (as in 👩‍💻) is part of the emoji, not hidden.
   nonisolated static func containsInvisibleOrDirectionalScalars(_ text: String) -> Bool {
     let scalars = Array(text.unicodeScalars)
     for (index, scalar) in scalars.enumerated() where isInvisibleOrDirectional(scalar) {
@@ -104,7 +163,7 @@ enum RichTextImport {
     case .format:
       return true
     case .control:
-      return scalar != "\t" && scalar != "\n"
+      return scalar != "\t" && scalar != "\n" && scalar != "\r"
     default:
       return false
     }
@@ -116,20 +175,19 @@ enum RichTextImport {
                             scalar == "\u{FE0F}")
   }
 
-  // Whether HTML uses anything that can make what a renderer shows differ
-  // from the scanned text: a `style` attribute or `<style>` block, a `class`
-  // or `id` together with a style sheet, the `hidden` attribute, `<script>`,
-  // form controls, an `<img>` with a text alternative, or `<svg>`. Plain
-  // structural and inline markup is not. Scans tags only, without rendering.
+  // Whether HTML may make what a renderer shows differ from the scanned
+  // text. An allow-list: only a fragment made solely of plain structural and
+  // inline elements without attributes (see `PlainHTML`) is not reported.
+  // Scans tags only, without rendering.
   static func htmlMayRenderDifferently(_ data: Data) -> Bool {
     guard let source = ClipboardHTMLText.decode(data) else {
       return true
     }
-    return HTMLRenderingFeatures.scan(source)
+    return !PlainHTML.isPlain(source)
   }
 
-  // Whether RTF marks text hidden (`\v`): AppKit's reader may keep text a
-  // renderer doesn't show.
+  // Whether RTF marks text hidden (`\v`): AppKit's reader keeps text a
+  // renderer doesn't show, and has no attribute for it.
   nonisolated static func rtfMayRenderDifferently(_ data: Data) -> Bool {
     let bytes = [UInt8](data)
     var index = 0
@@ -150,61 +208,91 @@ enum RichTextImport {
   }
 }
 
-// A tag scanner for `RichTextImport.htmlMayRenderDifferently`. Linear in the
-// input; it stops at the first feature found.
-private nonisolated enum HTMLRenderingFeatures {
-  private static let formControls: Set<String> = [
-    "input", "button", "select", "option", "textarea", "form", "label", "datalist", "output"
-  ]
-  private static let textAlternatives: Set<String> = ["alt", "title", "aria-label"]
+// The allow-list for `RichTextImport.htmlMayRenderDifferently`. HTML is
+// plain only if every tag is one of `elements` with no attributes other than
+// those listed for it, every comment is a StartFragment/EndFragment marker,
+// and the only declaration is `<!DOCTYPE html>`. Everything else (any other
+// element such as `font`, `bdo`, `bdi`, `ruby`, `sup`, `sub`, `img`, `svg`,
+// `script`, `style`, `title` or a form control; any other attribute such as
+// `style`, `class`, `id`, `color`, `dir`, `hidden`, `size` or an event
+// handler; CDATA, processing instructions, an unterminated tag) is not.
+// Linear in the input; it stops at the first thing not allowed.
+nonisolated enum PlainHTML {
+  static let elements: [String: Set<String>] = {
+    var elements: [String: Set<String>] = [:]
+    for name in ["html", "head", "body", "p", "br", "div", "span", "b", "strong", "i", "em", "u", "s",
+                 "code", "pre", "blockquote", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "table", "thead", "tbody", "tr"] {
+      elements[name] = []
+    }
+    elements["meta"] = ["charset"]
+    elements["a"] = ["href"]
+    elements["td"] = ["colspan", "rowspan"]
+    elements["th"] = ["colspan", "rowspan"]
+    return elements
+  }()
+  static let comments: Set<String> = ["StartFragment", "EndFragment"]
 
-  static func scan(_ source: String) -> Bool {
+  static func isPlain(_ source: String) -> Bool {
     let bytes = Array(source.utf8)
     var index = 0
-    var hasStyleSheet = false
-    var usesClassOrID = false
     while index < bytes.count {
       guard bytes[index] == 0x3C else {
         index += 1
         continue
       }
-      // Comments and declarations hide nothing a renderer shows.
       if bytes[index...].starts(with: Array("<!--".utf8)) {
-        index += 4
-        while index < bytes.count && !bytes[index...].starts(with: Array("-->".utf8)) { index += 1 }
-        index += 3
+        let start = index + 4
+        var end = start
+        while end < bytes.count && !bytes[end...].starts(with: Array("-->".utf8)) { end += 1 }
+        guard end < bytes.count else { return false }
+        let comment = String(decoding: bytes[start..<end], as: UTF8.self)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard comments.contains(comment) else { return false }
+        index = end + 3
+        continue
+      }
+      if index + 1 < bytes.count && (bytes[index + 1] == 0x21 || bytes[index + 1] == 0x3F) {
+        // A declaration or processing instruction: only <!DOCTYPE html>.
+        var end = index
+        while end < bytes.count && bytes[end] != 0x3E { end += 1 }
+        guard end < bytes.count else { return false }
+        let declaration = String(decoding: bytes[index...end], as: UTF8.self).lowercased()
+          .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard declaration == "<!doctype html>" else { return false }
+        index = end + 1
         continue
       }
       var cursor = index + 1
-      if cursor < bytes.count && bytes[cursor] == 0x2F {
-        cursor += 1
-      }
+      let closing = cursor < bytes.count && bytes[cursor] == 0x2F
+      if closing { cursor += 1 }
       let nameStart = cursor
       while cursor < bytes.count && isNameByte(bytes[cursor]) { cursor += 1 }
       guard cursor > nameStart else {
+        // A `<` that starts no tag is text, as the scanner reads it.
         index += 1
         continue
       }
       let name = String(decoding: bytes[nameStart..<cursor], as: UTF8.self).lowercased()
-      var attributes: [String: String] = [:]
+      guard let allowedAttributes = elements[name] else { return false }
+      var attributes = Set<String>()
       while cursor < bytes.count && bytes[cursor] != 0x3E {
         if isSpace(bytes[cursor]) || bytes[cursor] == 0x2F {
           cursor += 1
           continue
         }
+        if bytes[cursor] == 0x3C { return false }
         let attributeStart = cursor
-        while cursor < bytes.count && !isSpace(bytes[cursor]) && ![0x3D, 0x3E].contains(bytes[cursor]) {
+        while cursor < bytes.count && !isSpace(bytes[cursor]) && ![0x3D, 0x3E, 0x3C].contains(bytes[cursor]) {
           cursor += 1
         }
-        let attribute = String(decoding: bytes[attributeStart..<cursor], as: UTF8.self).lowercased()
-        var value = ""
+        attributes.insert(String(decoding: bytes[attributeStart..<cursor], as: UTF8.self).lowercased())
         while cursor < bytes.count && isSpace(bytes[cursor]) { cursor += 1 }
         if cursor < bytes.count && bytes[cursor] == 0x3D {
           cursor += 1
           while cursor < bytes.count && isSpace(bytes[cursor]) { cursor += 1 }
           let quote: UInt8? = cursor < bytes.count && [0x22, 0x27].contains(bytes[cursor]) ? bytes[cursor] : nil
           if quote != nil { cursor += 1 }
-          let valueStart = cursor
           while cursor < bytes.count {
             if let quote {
               if bytes[cursor] == quote { break }
@@ -213,36 +301,21 @@ private nonisolated enum HTMLRenderingFeatures {
             }
             cursor += 1
           }
-          value = String(decoding: bytes[valueStart..<cursor], as: UTF8.self).lowercased()
-          if quote != nil && cursor < bytes.count { cursor += 1 }
-        }
-        if !attribute.isEmpty {
-          attributes[attribute] = value
+          if quote != nil {
+            guard cursor < bytes.count else { return false }
+            cursor += 1
+          }
         }
         if cursor == attributeStart { cursor += 1 }
       }
+      // An unterminated tag.
+      guard cursor < bytes.count else { return false }
+      if closing ? !attributes.isEmpty : !attributes.isSubset(of: allowedAttributes) {
+        return false
+      }
       index = cursor + 1
-
-      if ["style", "script", "svg"].contains(name) || formControls.contains(name) {
-        return true
-      }
-      if attributes["style"] != nil || attributes["hidden"] != nil {
-        return true
-      }
-      if name == "img" && !textAlternatives.isDisjoint(with: attributes.keys) {
-        return true
-      }
-      if name == "link" && attributes["rel"]?.split(separator: " ").contains("stylesheet") == true {
-        hasStyleSheet = true
-      }
-      if attributes["class"] != nil || attributes["id"] != nil {
-        usesClassOrID = true
-      }
-      if hasStyleSheet && usesClassOrID {
-        return true
-      }
     }
-    return false
+    return true
   }
 
   private static func isNameByte(_ byte: UInt8) -> Bool {

@@ -584,9 +584,11 @@ class HistoryItem {
   // rendered) is compared with the plain text after only
   // `RichTextImport.comparableText`. Equal extracted text is not proof that a
   // renderer shows the same, so it never yields an assurance: at best nothing
-  // is said (`.noTextDifference`), and when the formatted version uses
-  // anything that can change what is rendered the result is
-  // `.renderingNotChecked`.
+  // is said (`.noTextDifference`), and only when every formatted version
+  // uses nothing beyond an allow-list of plain formatting
+  // (`RichTextImport.htmlMayRenderDifferently`,
+  // `RichTextImport.rtfFormattingMayRenderDifferently`); otherwise the result
+  // is `.renderingNotChecked`, expected for most styled web and Office copies.
   @MainActor
   func formattedTextComparison(
     readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList
@@ -602,7 +604,8 @@ class HistoryItem {
       formatted.append((RichTextImport.text(fromHTML: html), RichTextImport.htmlMayRenderDifferently(html)))
     }
     if let rtf = rtfData(readableBy: allowList) {
-      formatted.append((RichTextImport.text(fromRTF: rtf), RichTextImport.rtfMayRenderDifferently(rtf)))
+      let inspected = RichTextImport.inspectRTF(rtf)
+      formatted.append((inspected?.text, inspected?.mayRenderDifferently ?? true))
     }
     guard !formatted.isEmpty else {
       return .notApplicable
@@ -755,22 +758,56 @@ class HistoryItem {
   // `ValidatedImage` off the main actor. Nil when there is none, it is
   // refused, the calling task was cancelled, or meanwhile the item was
   // deleted, its images were cleaned up, or the image may no longer be read.
+  #if DEBUG
+  // DIAGNOSTIC (temporary): which nil path `decodedImage` took, with the
+  // identities involved.
+  @MainActor static var decodedImageTraceForTesting: [String] = []
+  @MainActor private func traceIdentities(_ label: String) {
+    let ids = contents.map { "\($0.type)#\(ObjectIdentifier($0).hashValue)/\($0.persistentModelID.hashValue)" }
+    Self.decodedImageTraceForTesting.append("\(label): contents=\(ids) source=\(String(describing: imageSource(readableBy: StoragePolicy.currentReadAllowList)))")
+  }
+  #endif
+
   @MainActor
   func decodedImage(for purpose: ValidatedImage.Purpose) async -> DecodedImage? {
+    #if DEBUG
+    Self.decodedImageTraceForTesting = []
+    #endif
     guard !Task.isCancelled else {
+      #if DEBUG
+      Self.decodedImageTraceForTesting.append("nil: cancelled before load")
+      #endif
       return nil
     }
     await loadImageIfNeeded()
     let generation = imageGeneration
+    #if DEBUG
+    traceIdentities("before decode")
+    #endif
     guard !Task.isCancelled, !isDeleted,
           let source = imageSource(readableBy: StoragePolicy.currentReadAllowList),
           let data = imageData(from: source) else {
+      #if DEBUG
+      Self.decodedImageTraceForTesting.append(
+        "nil: before decode cancelled=\(Task.isCancelled) deleted=\(isDeleted) " +
+        "source=\(imageSource(readableBy: StoragePolicy.currentReadAllowList) != nil)")
+      #endif
       return nil
     }
 
     let decoded = await ValidatedImage.decode(data, for: purpose)
+    #if DEBUG
+    traceIdentities("after decode")
+    if decoded == nil { Self.decodedImageTraceForTesting.append("nil: decode failed") }
+    #endif
     guard !Task.isCancelled, generation == imageGeneration, !isDeleted,
           imageSource(readableBy: StoragePolicy.currentReadAllowList) == source else {
+      #if DEBUG
+      Self.decodedImageTraceForTesting.append(
+        "nil: after decode cancelled=\(Task.isCancelled) generation=\(generation == imageGeneration) " +
+        "deleted=\(isDeleted) sameSource=\(imageSource(readableBy: StoragePolicy.currentReadAllowList) == source) " +
+        "storageHasChanges=\(Storage.shared.context.hasChanges)")
+      #endif
       return nil
     }
     return decoded

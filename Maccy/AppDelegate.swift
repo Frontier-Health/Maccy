@@ -30,7 +30,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private var isStatusItemDisabled: Bool {
-    !Defaults[.captureMode].capturesCopies || Defaults[.enabledPasteboardTypes].isEmpty
+    !CaptureMode.effective(in: Clipboard.shared.capturePreferences).capturesCopies ||
+      Defaults[.enabledPasteboardTypes].isEmpty
   }
 
   private var statusItemVisibilityObserver: NSKeyValueObservation?
@@ -96,7 +97,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     updateStatusItemAccessibilityLabel()
 
     Task {
-      for await _ in Defaults.updates(.captureMode) {
+      for await _ in Defaults.updates([.captureMode, .legacyIgnoreEvents, .legacyIgnoreOnlyNextEvent]) {
         statusItem.button?.appearsDisabled = isStatusItemDisabled
         updateStatusItemAccessibilityLabel()
       }
@@ -192,15 +193,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       .union(NSEvent.modifierFlags)
       .intersection(.deviceIndependentFlagsMask)
 
-    if modifierFlags.contains(.option) {
-      // Every click sets the whole mode, so a one-shot skip can't linger
-      // behind a later permanent pause.
-      if modifierFlags.contains(.shift) {
-        Defaults[.captureMode] = Defaults[.captureMode].togglingSkipNext()
-      } else {
-        Defaults[.captureMode] = Defaults[.captureMode].togglingPause()
-      }
-
+    if let request = CaptureModeRequest(statusItemClickWith: modifierFlags) {
+      Clipboard.shared.perform(request)
       return
     }
 

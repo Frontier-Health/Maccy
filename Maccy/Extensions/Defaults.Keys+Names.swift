@@ -24,9 +24,12 @@ nonisolated extension Defaults.Keys {
   nonisolated(unsafe) private static let preferencesSuite: UserDefaults = .standard
 #endif
 
-  // Replaces the old `ignoreEvents` / `ignoreOnlyNextEvent` keys, which are
-  // migrated once and then ignored. See CaptureMode.migrateLegacyDefaults.
-  static let captureMode = Key<CaptureMode>(CaptureMode.defaultsKey, default: .capturing, suite: preferencesSuite)
+  // Capture state. Read it only through CaptureMode.effective(in:), which treats a
+  // malformed value as paused and honours the legacy keys; reading these keys
+  // directly would miss both. They are declared so changes can be observed.
+  static let captureMode = Key<String?>(CaptureMode.defaultsKey, suite: preferencesSuite)
+  static let legacyIgnoreEvents = Key<Bool?>(CaptureMode.legacyIgnoreEventsKey, suite: preferencesSuite)
+  static let legacyIgnoreOnlyNextEvent = Key<Bool?>(CaptureMode.legacyIgnoreOnlyNextEventKey, suite: preferencesSuite)
   static let clearOnQuit = Key<Bool>("clearOnQuit", default: false, suite: preferencesSuite)
   static let clearSystemClipboard = Key<Bool>("clearSystemClipboard", default: false, suite: preferencesSuite)
   static let clipboardCheckInterval = Key<Double>("clipboardCheckInterval", default: 0.5, suite: preferencesSuite)

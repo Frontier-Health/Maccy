@@ -2,14 +2,16 @@ import SwiftUI
 import Defaults
 
 struct AdvancedSettingsPane: View {
-  @Default(.captureMode) private var captureMode
+  @State private var captureMode = CaptureMode.capturing
+  @State private var captureModeLocked = false
 
   // On for both `paused` and `skipNext`. Switching it either way sets the whole
-  // mode, which clears any pending one-shot skip.
+  // mode, which clears any pending one-shot skip. Disabled while a configuration
+  // profile pins the capture state.
   private var turnedOff: Binding<Bool> {
     Binding(
       get: { !captureMode.capturesCopies },
-      set: { captureMode = $0 ? .paused : .capturing }
+      set: { Clipboard.shared.perform($0 ? .pause : .resume) }
     )
   }
 
@@ -17,6 +19,14 @@ struct AdvancedSettingsPane: View {
     VStack(alignment: .leading) {
       Toggle(isOn: turnedOff) {
         Text("TurnOff", tableName: "AdvancedSettings")
+      }
+      .disabled(captureModeLocked)
+      .task {
+        for await _ in Defaults.updates([.captureMode, .legacyIgnoreEvents, .legacyIgnoreOnlyNextEvent]) {
+          let preferences = Clipboard.shared.capturePreferences
+          captureMode = CaptureMode.effective(in: preferences)
+          captureModeLocked = CaptureMode.isLockedByProfile(in: preferences)
+        }
       }
       Text("TurnOffDescription", tableName: "AdvancedSettings")
         .fixedSize(horizontal: false, vertical: true)

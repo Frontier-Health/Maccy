@@ -39,8 +39,23 @@ class Clipboard {
 
   private var sourceApp: NSRunningApplication? { NSWorkspace.shared.frontmostApplication }
 
+  // Where capture settings live. See CaptureMode.
+  let capturePreferences = Defaults.Keys.captureMode.suite
+  // The effective capture mode at the previous check; nil before the first.
+  private var lastCheckedCaptureMode: CaptureMode?
+  private let captureSettingsChanges = CaptureSettingsChangeFlag()
+  private var captureSettingsObservation: Defaults.Observation?
+
   init() {
     changeCount = pasteboard.changeCount
+    // Synchronous for writes made in this process, so an in-app pause/resume is
+    // seen even if no check runs in between.
+    captureSettingsObservation = Defaults.observe(
+      keys: .captureMode, .legacyIgnoreEvents, .legacyIgnoreOnlyNextEvent,
+      options: []
+    ) { @Sendable [captureSettingsChanges] in
+      captureSettingsChanges.set()
+    }
   }
 
   func onNewCopy(_ hook: @escaping OnNewCopyHook) {
@@ -64,6 +79,24 @@ class Clipboard {
   func restart() {
     timer?.invalidate()
     start()
+  }
+
+  // Pause, resume or skip from the UI. Resuming also treats everything already
+  // on the pasteboard as seen, so a copy made while paused is never recorded.
+  @discardableResult
+  func perform(_ request: CaptureModeRequest) -> CaptureMode {
+    let mode = CaptureMode.perform(request, in: capturePreferences)
+    if mode == .capturing {
+      syncCaptureState()
+    }
+    return mode
+  }
+
+  // Marks the current pasteboard contents as seen under the current mode.
+  func syncCaptureState() {
+    changeCount = pasteboard.changeCount
+    lastCheckedCaptureMode = CaptureMode.effective(in: capturePreferences)
+    _ = captureSettingsChanges.take()
   }
 
   func isPersistable(_ type: NSPasteboard.PasteboardType) -> Bool {
@@ -158,26 +191,31 @@ class Clipboard {
 
   @objc
   @MainActor
-  func checkForChangesInPasteboard() { // swiftlint:disable:this cyclomatic_complexity
+  func checkForChangesInPasteboard() { // swiftlint:disable:this cyclomatic_complexity function_body_length
+    CaptureMode.absorbLegacyOneShot(in: capturePreferences)
+    let settingsChanged = captureSettingsChanges.take()
+    let captureMode = CaptureMode.effective(in: capturePreferences)
+    let previousCaptureMode = lastCheckedCaptureMode
+    lastCheckedCaptureMode = captureMode
+
     guard pasteboard.changeCount != changeCount else {
       return
     }
 
     changeCount = pasteboard.changeCount
 
-    if pasteboard.pasteboardItems?.contains(where: { $0.types.contains(.fromMaccy) }) != true {
+    let isFromMaccy = pasteboard.pasteboardItems?.contains(where: { $0.types.contains(.fromMaccy) }) == true
+    if !isFromMaccy {
       // External copy occurred. Stop the current paste stack.
       // Maybe queue it into the paste stack? Configurable behaviour?
       AppState.shared.history.interruptPasteStack()
     }
 
-    let captureMode = Defaults[.captureMode]
-    guard captureMode.capturesCopies else {
-      let nextMode = captureMode.afterCopy
-      if nextMode != captureMode {
-        Defaults[.captureMode] = nextMode
-      }
-
+    guard CaptureMode.changeIsAttributable(
+      to: captureMode,
+      previousMode: previousCaptureMode,
+      settingsChanged: settingsChanged
+    ) else {
       return
     }
 
@@ -224,6 +262,17 @@ class Clipboard {
     })
 
     guard !contents.isEmpty else {
+      return
+    }
+
+    if captureMode == .skipNext {
+      // This copy would have been recorded, so it is the one to skip. Maccy's
+      // own writes don't count.
+      let isMaccySource = pasteboard.string(forType: .source) == NSPasteboard.PasteboardType.fromMaccy.rawValue
+      if !isFromMaccy && !isMaccySource {
+        CaptureMode.consumeSkip(in: capturePreferences)
+      }
+
       return
     }
 

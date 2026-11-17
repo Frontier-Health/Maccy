@@ -77,11 +77,15 @@ defaults write org.p0deje.Maccy captureMode paused # default is capturing
 
 This is useful if you have some workflow for copying sensitive data. You can set `captureMode` to `paused`, copy the data and set `captureMode` back to `capturing`.
 
-To ignore only the next copy, set `captureMode` to `skipNext`. Maccy switches back to `capturing` after that one copy.
+To ignore only the next copy, set `captureMode` to `skipNext`. Maccy switches back to `capturing` after skipping one copy that it would otherwise have recorded. Copies it ignores anyway (empty, concealed or transient, from ignored apps, of ignored types or matching ignore patterns) and Maccy's own copies don't use up the skip.
 
-The older `ignoreEvents` and `ignoreOnlyNextEvent` keys are migrated to `captureMode` once, the first time a version with `captureMode` starts, and are ignored after that. Scripts and configuration profiles that write them must switch to `captureMode`.
+Any value of `captureMode` other than exactly `capturing`, `paused` or `skipNext` is treated as `paused`. If you pause, copy and resume quickly, Maccy discards the copy rather than guess whether it came before or after the resume.
+
+The older `ignoreEvents` and `ignoreOnlyNextEvent` keys still work, but only to make Maccy capture less: `ignoreEvents` set to true pauses Maccy until it is set back to false or removed, and `ignoreOnlyNextEvent` set to true skips the next copy and is then removed. Use `captureMode` in new scripts.
 
 You can also click the menu icon with <kbd>OPTION (⌥)</kbd> pressed. To ignore only the next copy, click with <kbd>OPTION (⌥)</kbd> + <kbd>SHIFT (⇧)</kbd> pressed.
+
+If a configuration profile manages `captureMode`, or sets `ignoreEvents` or `ignoreOnlyNextEvent` to true, the settings toggle and the menu icon clicks can't change whether Maccy captures. A managed `captureMode` of `skipNext` is treated as `paused`.
 
 ### Ignore Custom Copy Types
 

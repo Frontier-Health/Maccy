@@ -118,18 +118,23 @@ extension SharedStateTests {
         popup.deferredSelection.sleepForTesting = nil
       }
       let item = history.added(historyItem("shortcut item"))
-      let event = try shortcutEvent(flags: [.command, .capsLock])
+      let expectedFlags: NSEvent.ModifierFlags =
+        NSEvent.ModifierFlags.currentModifierFlags == .command ? .option : .command
+      let event = try shortcutEvent(flags: expectedFlags.union(.capsLock))
       let log = SelectionLog()
-      #expect(popup.scheduleShortcutSelection(for: event) { selected, flags in
-        #expect(selected == item)
+      var selectedItem: HistoryItemDecorator?
+      let scheduled = popup.scheduleShortcutSelection(for: event) { selected, flags in
+        selectedItem = selected
         log.flags.append(flags)
-      })
+      }
+      #expect(scheduled)
       let pending = popup.deferredSelection.pendingTaskForTesting
       #expect(log.flags.isEmpty)
       // There is no current AppKit key event corresponding to our synthetic
       // event when the deferred action runs; it must use the supplied event.
       await pending?.value
-      #expect(log.flags == [[.command]])
+      #expect(selectedItem == item)
+      #expect(log.flags == [expectedFlags])
     }
 
     @Test("Another key press cancels shortcut selection")

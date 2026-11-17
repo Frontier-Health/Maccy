@@ -139,6 +139,7 @@ class Popup {
       History.shared.select($0, flags: $1)
     }
   ) -> Bool {
+    beginKeyPress()
     guard let item = History.shared.shortcutItem(for: event) else { return false }
     AppState.shared.navigator.select(item: item)
     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

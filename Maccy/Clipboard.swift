@@ -258,7 +258,7 @@ class Clipboard {
     beforeItemReadForTesting?()
     #endif
     let items = pasteboard.pasteboardItems ?? []
-    let copy = PasteboardCopyRead.read(items, storing: allowList)
+    let copy = PasteboardCopyRead.read(items, storing: allowList, includingSource: captureMode == .skipNext)
     // Ignore rules read the text of the string, file URL, RTF and HTML
     // representations of every item whatever the storage setting, without
     // storing it, reusing what the snapshot already read.
@@ -282,7 +282,7 @@ class Clipboard {
     // A copy over a limit is not recorded at all, and doesn't use up skip next.
     if let violation = copy.violation {
       logger.warning("Copy not recorded: \(violation.description)")
-      if shouldNotifyCopyTooLarge(captureMode: captureMode, isFromMaccy: isFromMaccy || copy.isMaccySource) {
+      if shouldNotifyCopyTooLarge(captureMode: captureMode, isFromMaccy: isFromMaccy) {
         Notifier.notifyCopyTooLarge()
       }
       return

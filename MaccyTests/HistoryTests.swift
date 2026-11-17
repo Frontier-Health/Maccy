@@ -146,7 +146,7 @@ extension SharedStateTests {
         log.flags.append(flags)
       })
       let pending = popup.deferredSelection.pendingTaskForTesting
-      popup.beginKeyPress()
+      #expect(!popup.scheduleShortcutSelection(for: try shortcutEvent(flags: [])))
       await pending?.value
       #expect(log.flags.isEmpty)
       #expect(!popup.deferredSelection.isPending)

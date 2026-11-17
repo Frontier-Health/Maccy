@@ -17,7 +17,7 @@ import AppKit
 //    items' values themselves, within their own limits, and only when there
 //    are rules.
 // 4. Metadata the watcher needs that is not stored, the
-//    org.nspasteboard.source marker, is part of the same snapshot: planned
+//    org.nspasteboard.source marker, is included when skip-next needs it: planned
 //    from type names (the first item that offers it), read once, checked
 //    against `ContentLimits.maximumMarkerBytes` (as is the stored
 //    `x.nspasteboard.ModifiedType` marker), and afterwards compared only as
@@ -98,7 +98,11 @@ struct PasteboardCopyRead {
     itemTypes.firstIndex { $0.contains(.source) }.map { Key(item: $0, type: .source) }
   }
 
-  static func read(_ items: [NSPasteboardItem], storing allowList: StorageAllowList) -> PasteboardCopyRead {
+  static func read(
+    _ items: [NSPasteboardItem],
+    storing allowList: StorageAllowList,
+    includingSource: Bool
+  ) -> PasteboardCopyRead {
     var copy = PasteboardCopyRead()
     let itemTypes = items.map(\.types)
     let planned = plan(itemTypes, storing: allowList)
@@ -119,7 +123,7 @@ struct PasteboardCopyRead {
 
     // The marker first: it is small, and a copy whose marker is over its
     // limit is refused before any content is read.
-    if let sourceKey = planSource(itemTypes) {
+    if includingSource, let sourceKey = planSource(itemTypes) {
       let read = readChecked(sourceKey)
       if let exceeded = read.violation {
         copy.violation = exceeded

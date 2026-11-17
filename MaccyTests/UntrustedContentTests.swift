@@ -918,6 +918,22 @@ extension SharedStateTests {
       clipboard.perform(.toggleSkipNext)
     }
 
+    @Test("Ordinary capture does not read the source marker or use it to admit a copy")
+    func ordinaryCaptureDoesNotReadSourceMarker() throws {
+      let provider = CountingDataProvider([
+        .string: Data("ordinary copy".utf8),
+        .source: Data(NSPasteboard.PasteboardType.fromMaccy.rawValue.utf8)
+      ])
+      let item = NSPasteboardItem()
+      item.setDataProvider(provider, forTypes: [.string, .source])
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+      let captured = try #require(checkNow().first)
+      #expect(provider.count(for: .source) == 0)
+      #expect(provider.count(for: .string) == 1)
+      #expect(!captured.contents.contains { $0.type == NSPasteboard.PasteboardType.source.rawValue })
+    }
+
     @Test("Skip next tells Maccy's own copies from the snapshot's marker bytes",
           arguments: [(true, false), (false, true)])
     func skipNextUsesSnapshotMarker(fromMaccy: Bool, consumesSkip: Bool) throws {

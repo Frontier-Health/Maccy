@@ -54,7 +54,9 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }
-  var hasRichText: Bool { item.rtf != nil || item.html != nil }
+  // Whether a formatted version is stored: checks the types present, without
+  // decoding anything.
+  var hasRichText: Bool { item.rtfData != nil || item.htmlData != nil }
 
   var previewImageGenerationTask: Task<(), Error>?
   var thumbnailImageGenerationTask: Task<(), Error>?

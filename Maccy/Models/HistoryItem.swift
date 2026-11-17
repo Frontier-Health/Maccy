@@ -439,14 +439,15 @@ class HistoryItem {
       return (content.type, text)
     }
 
+    // Bounded RTF import; HTML is scanned, never rendered (see RichTextImport).
     if let content = firstContent([.rtf], readableBy: allowList),
-       let text = content.value.flatMap({ NSAttributedString(rtf: $0, documentAttributes: nil)?.string }),
+       let text = content.value.flatMap(RichTextImport.text(fromRTF:)),
        !text.isEmpty {
       return (content.type, text)
     }
 
     if let content = firstContent([.html], readableBy: allowList),
-       let text = content.value.flatMap({ NSAttributedString(html: $0, documentAttributes: nil)?.string }),
+       let text = content.value.flatMap(RichTextImport.text(fromHTML:)),
        !text.isEmpty {
       return (content.type, text)
     }
@@ -524,13 +525,6 @@ class HistoryItem {
 
   var htmlData: Data? { htmlData(readableBy: StoragePolicy.currentReadAllowList) }
   func htmlData(readableBy allowList: StorageAllowList) -> Data? { contentData([.html], readableBy: allowList) }
-  var html: NSAttributedString? {
-    guard let data = htmlData else {
-      return nil
-    }
-
-    return NSAttributedString(html: data, documentAttributes: nil)
-  }
 
   // Image data comes only from an image type allowed now, never from another
   // stored image format.
@@ -601,13 +595,6 @@ class HistoryItem {
 
   var rtfData: Data? { rtfData(readableBy: StoragePolicy.currentReadAllowList) }
   func rtfData(readableBy allowList: StorageAllowList) -> Data? { contentData([.rtf], readableBy: allowList) }
-  var rtf: NSAttributedString? {
-    guard let data = rtfData else {
-      return nil
-    }
-
-    return NSAttributedString(rtf: data, documentAttributes: nil)
-  }
 
   func clearDecodedImageCache() {
     cachedDecodedImage?.recache()

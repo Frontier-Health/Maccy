@@ -355,9 +355,11 @@ class Clipboard {
   }
 
   private func richText(_ item: NSPasteboardItem, storing allowList: StorageAllowList) -> Bool {
+    // RTF is imported only within RichTextImport's bounds. HTML is scanned,
+    // never rendered, so nothing it refers to is loaded.
     if allowList.allows(.rtf), let rtf = item.data(forType: .rtf) {
-      if let attributedString = NSAttributedString(rtf: rtf, documentAttributes: nil) {
-        return !attributedString.string.isEmpty
+      if let text = RichTextImport.text(fromRTF: rtf) {
+        return !text.isEmpty
       }
     }
 

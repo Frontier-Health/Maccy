@@ -263,7 +263,66 @@ extension SharedStateTests {
       }
     }
 
+    // MARK: Group 3: no WebKit import
+
+    @Test("HTML referring to a remote image and style sheet is captured, titled and checked without rendering it")
+    func htmlIsNeverRendered() throws {
+      // Every WebKit importer is gone from the app (tools/check-rich-text-importers.py
+      // enforces it in CI), so nothing below can load these. This checks the
+      // paths produce the scanned text, import no RTF and load no WebKit.
+      let webKitWasLoaded = webKitIsLoaded
+      let rtfImports = RichTextImport.rtfImportsForTesting
+      let html = """
+        <html><head><link rel="stylesheet" href="https://example.invalid/a7.css">
+        <style>@import url("https://example.invalid/b.css");</style></head>
+        <body><img src="https://example.invalid/a7.png"><p>Hello <b>remote</b></p></body></html>
+        """
+      let item = NSPasteboardItem()
+      item.setString(html, forType: .html)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+
+      let decorator = History.shared.added(try #require(checkNow().first))
+      // The scanned text; block breaks may show as special symbols.
+      #expect(decorator.item.displayTitle.contains("Hello remote"))
+      decorator.item.regenerateTitle()
+      #expect(decorator.item.displayTitle.contains("Hello remote"))
+      #expect(decorator.previewText.string.contains("Hello remote"))
+      #expect(decorator.hasRichText)
+      #expect(!decorator.hasPlainText)
+      #expect(RichTextImport.rtfImportsForTesting == rtfImports)
+      if !webKitWasLoaded {
+        #expect(!webKitIsLoaded)
+      }
+    }
+
+    @Test("RTF is imported for a title only within the ignore-rule RTF limits")
+    func rtfImportIsBounded() throws {
+      let small = NSAttributedString(string: "Small rich text")
+      let smallRTF = try #require(small.rtf(from: NSRange(location: 0, length: small.length)))
+      let imports = RichTextImport.rtfImportsForTesting
+      #expect(RichTextImport.text(fromRTF: smallRTF) == "Small rich text")
+      #expect(RichTextImport.rtfImportsForTesting == imports + 1)
+
+      let large = NSAttributedString(string: String(repeating: "x", count: IgnoreRules.rtfDataLimit + 1))
+      let largeRTF = try #require(large.rtf(from: NSRange(location: 0, length: large.length)))
+      #expect(!RichTextImport.rtfIsImportable(largeRTF))
+      let item = HistoryItem(contents: [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.rtf.rawValue, value: largeRTF)
+      ])
+      Storage.shared.context.insert(item)
+      item.regenerateTitle()
+      #expect(item.displayTitle == "")
+      #expect(HistoryItemDecorator(item).hasRichText)
+      #expect(RichTextImport.rtfImportsForTesting == imports + 1)
+    }
+
     // MARK: Helpers
+
+    // Whether WebKit (modern or legacy) is in the process. Doesn't load it.
+    private var webKitIsLoaded: Bool {
+      NSClassFromString("WKWebView") != nil || NSClassFromString("WebView") != nil
+    }
 
     private func universalClipboardItem(_ url: URL) -> HistoryItem {
       let item = HistoryItem()

@@ -25,6 +25,14 @@ struct PreviewItemView: View {
               Image(nsImage: image)
                 .resizable()
             }
+          } else if item.isUniversalClipboardImage {
+            // Denied by the sandbox or refused by a check: a neutral
+            // placeholder, never a broken image or the file's path.
+            Text(Self.universalClipboardUnavailableNote)
+              .foregroundStyle(.secondary)
+              .frame(maxWidth: .infinity, alignment: .center)
+              .padding(.vertical, 24)
+              .background(Color.gray.opacity(0.15), in: .rect(cornerRadius: 5))
           } else {
             previewImage {
               ZStack {
@@ -182,6 +190,15 @@ struct PreviewItemView: View {
         .foregroundStyle(.orange)
     }
     .padding(.top, 6)
+  }
+
+  static var universalClipboardUnavailableNote: String {
+    NSLocalizedString(
+      "UniversalClipboardImageUnavailable",
+      tableName: "PreviewItemView",
+      value: "Image from another device is not available",
+      comment: ""
+    )
   }
 
   // The tag shown for `.renderingNotChecked`; its help text is the note.

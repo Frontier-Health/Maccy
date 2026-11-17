@@ -723,12 +723,30 @@ class HistoryItem {
       universalClipboardFileLoad = load
     }
     let generation = imageGeneration
-    let data = await load.value
+    let result = await load.value
     guard generation == imageGeneration, universalClipboardFileLoad === load, !isDeleted else {
       return
     }
+    // A cancelled read says nothing about the file; the next request reads it.
+    if case .failure(.cancelled) = result {
+      universalClipboardFileLoad = nil
+      return
+    }
+    let data = try? result.get()
     universalClipboardFileLoad = nil
     universalClipboardFileData = UniversalClipboardFileData(url: url, data: data)
+  }
+
+  // Whether the item's image is a Universal Clipboard file that was read and
+  // is not available (access denied, or a check failed). The preview then
+  // shows a neutral placeholder, never the file's path.
+  @MainActor
+  var universalClipboardImageIsUnavailable: Bool {
+    guard case .universalClipboardFile(let url) = imageSource(readableBy: StoragePolicy.currentReadAllowList),
+          let loaded = universalClipboardFileData, loaded.url == url else {
+      return false
+    }
+    return loaded.data == nil
   }
 
   // What `ValidatedImage.inspect` found for the image that may be read now,
@@ -1055,16 +1073,16 @@ nonisolated final class TextRecognitionJob: @unchecked Sendable {
 nonisolated final class UniversalClipboardFileLoad: Sendable {
   let url: URL
   private let cancellation: UniversalClipboardFile.Cancellation
-  private let task: Task<Data?, Never>
+  private let task: Task<Result<Data, UniversalClipboardFile.Rejection>, Never>
 
   init(url: URL) {
     let cancellation = UniversalClipboardFile.Cancellation()
     self.url = url
     self.cancellation = cancellation
-    task = Task.detached { await UniversalClipboardFile.load(url, cancellation: cancellation) }
+    task = Task.detached { await UniversalClipboardFile.loadResult(url, cancellation: cancellation) }
   }
 
-  var value: Data? {
+  var value: Result<Data, UniversalClipboardFile.Rejection> {
     get async { await task.value }
   }
 
@@ -1080,6 +1098,7 @@ nonisolated struct ImageInspectionCache {
 
 nonisolated struct UniversalClipboardFileData {
   let url: URL
+  // Nil: a check failed or access was denied.
   let data: Data?
 }
 

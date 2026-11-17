@@ -45,7 +45,8 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   }
 
   // A Universal Clipboard image counts before its file is read (in the
-  // background); if the read fails the preview shows the broken-image symbol.
+  // background); if the read is denied or fails a check, the preview shows a
+  // neutral "not available" placeholder.
   // Any other image counts if ValidatedImage accepts it, judged from its
   // headers without decoding it.
   var hasImage: Bool {
@@ -53,6 +54,12 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
       return true
     }
     return item.imageInspection != nil
+  }
+  var isUniversalClipboardImage: Bool {
+    if case .universalClipboardFile = item.imageSource(readableBy: StoragePolicy.currentReadAllowList) {
+      return true
+    }
+    return false
   }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }

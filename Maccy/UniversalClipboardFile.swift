@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Logging
 
 // The file a Universal Clipboard image copy points to.
 //
@@ -20,6 +21,14 @@ import Foundation
 //   and no larger than `maximumBytes`.
 // The read happens off the main thread, on `queue`, and stops early when
 // cancelled.
+//
+// Sandbox: the app's entitlements grant the sandbox and user-selected
+// read-only access, nothing that establishes access to Apple's group
+// container, so in the signed sandboxed app this read may always be denied
+// (unverified: needs a signed build and a real iPhone copy). A denied read
+// (`EPERM`/`EACCES`) is `.accessDenied`: it is logged once per launch without
+// any path or content, and no later read is attempted in that launch. The
+// preview then says the image from another device is not available.
 //
 // Threat boundary: a malicious clipboard URL (any app can write one) cannot
 // make Maccy read anything outside the current user's staging directories. A
@@ -48,7 +57,38 @@ nonisolated enum UniversalClipboardFile {
     case notOwnedByUser
     case hardLinked
     case cancelled
+    // The sandbox (or file permissions) refused access.
+    case accessDenied
   }
+
+  // Whether a read was denied in this launch, and whether that was logged.
+  private nonisolated final class AccessDenial: @unchecked Sendable {
+    private let lock = NSLock()
+    private var denied = false
+    private var logs = 0
+
+    var isDenied: Bool { lock.withLock { denied } }
+    var logCount: Int { lock.withLock { logs } }
+
+    // Returns whether this is the first denial of the launch.
+    func record() -> Bool {
+      lock.withLock {
+        guard !denied else { return false }
+        denied = true
+        logs += 1
+        return true
+      }
+    }
+
+    func reset() {
+      lock.withLock { denied = false; logs = 0 }
+    }
+  }
+
+  private static let accessDenial = AccessDenial()
+
+  // Whether a read was denied earlier in this launch.
+  static var accessWasDenied: Bool { accessDenial.isDenied }
 
   // Set from any thread to stop a read in progress.
   nonisolated final class Cancellation: @unchecked Sendable {
@@ -70,6 +110,8 @@ nonisolated enum UniversalClipboardFile {
   nonisolated(unsafe) static var maximumBytesForTesting: Int?
   // Called on every read with whether it ran on the main thread.
   nonisolated(unsafe) static var readObserverForTesting: (@Sendable (_ onMainThread: Bool) -> Void)?
+  static var accessDeniedLogsForTesting: Int { accessDenial.logCount }
+  static func resetAccessDeniedForTesting() { accessDenial.reset() }
   #endif
 
   static var maximumBytes: Int {
@@ -158,7 +200,7 @@ nonisolated enum UniversalClipboardFile {
     }
     // Without the trailing "/", which would make lstat follow a symlink.
     var directoryStatus = stat()
-    guard lstat(String(directory.dropLast()), &directoryStatus) == 0 else { throw .unreadable }
+    guard lstat(String(directory.dropLast()), &directoryStatus) == 0 else { throw deniedOr(.unreadable) }
     guard (directoryStatus.st_mode & S_IFMT) == S_IFDIR, directoryStatus.st_uid == getuid() else {
       throw .allowedDirectoryNotTrusted
     }
@@ -167,7 +209,7 @@ nonisolated enum UniversalClipboardFile {
     // opening a FIFO doesn't wait for a writer.
     let descriptor = open(url.standardizedFileURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
     guard descriptor >= 0 else {
-      throw errno == ELOOP ? .notRegularFile : .unreadable
+      throw errno == ELOOP ? .notRegularFile : deniedOr(.unreadable)
     }
     defer { close(descriptor) }
 
@@ -209,6 +251,11 @@ nonisolated enum UniversalClipboardFile {
     return data
   }
 
+  // `.accessDenied` when the last call failed because access was refused.
+  private static func deniedOr(_ rejection: Rejection) -> Rejection {
+    errno == EPERM || errno == EACCES ? .accessDenied : rejection
+  }
+
   // The checks on the opened file's status: a regular file owned by the
   // current user, with no other hard link (another name for it could be
   // anywhere on the volume).
@@ -221,13 +268,29 @@ nonisolated enum UniversalClipboardFile {
   // `read(_:)` on a background queue; nil when any check fails or the read
   // was cancelled.
   static func load(_ url: URL, cancellation: Cancellation? = nil) async -> Data? {
+    try? await loadResult(url, cancellation: cancellation).get()
+  }
+
+  // `read(_:)` on a background queue. Once a read was denied, later ones in
+  // the same launch fail the same way without touching the file system.
+  static func loadResult(_ url: URL, cancellation: Cancellation? = nil) async -> Result<Data, Rejection> {
     await withCheckedContinuation { continuation in
       queue.async {
         guard cancellation?.isCancelled != true else {
-          continuation.resume(returning: nil)
+          continuation.resume(returning: .failure(.cancelled))
           return
         }
-        continuation.resume(returning: try? read(url, cancellation: cancellation))
+        guard !accessDenial.isDenied else {
+          continuation.resume(returning: .failure(.accessDenied))
+          return
+        }
+        let result = Result { () throws(Rejection) -> Data in try read(url, cancellation: cancellation) }
+        if case .failure(.accessDenied) = result, accessDenial.record() {
+          Logger(label: AppIdentity.bundleIdentifier).notice(
+            "Universal Clipboard image not available: access denied; not retried in this launch"
+          )
+        }
+        continuation.resume(returning: result)
       }
     }
   }

@@ -124,6 +124,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
+    IntentImageExports.removeLeftoversOnce()
     let descriptor = FetchDescriptor<HistoryItem>()
     let results = try Storage.shared.context.fetch(descriptor)
     let decorators = sorter.sort(results).map { HistoryItemDecorator($0) }
@@ -175,6 +176,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       item.numberOfCopies += existingHistoryItem.numberOfCopies
       item.pin = existingHistoryItem.pin
       item.title = existingHistoryItem.title
+      IntentImageExports.transfer(from: existingHistoryItem, to: item)
       if !item.fromMaccy {
         item.application = existingHistoryItem.application
       }
@@ -344,7 +346,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func cleanup(_ item: HistoryItemDecorator) {
-    IntentImageExports.removeAll()
+    IntentImageExports.remove(for: item.item)
     item.cleanupImages()
   }
 

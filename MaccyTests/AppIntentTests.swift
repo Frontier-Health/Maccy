@@ -1,4 +1,5 @@
 import AppIntents
+import AppKit
 import Defaults
 import Foundation
 import Testing
@@ -62,12 +63,32 @@ extension SharedStateTests {
       #expect(Clear.authenticationPolicy == .requiresAuthentication)
     }
 
+    @Test("Disabled intents leave history untouched")
+    func disabledIntentsDoNotTouchHistory() async {
+      let savedEnabled = Defaults[.intentsEnabled]
+      let history = AppState.shared.history
+      let decorator = history.add(historyItem("kept while intents are disabled"))
+      let countBefore = history.items.count
+      Defaults[.intentsEnabled] = false
+      defer {
+        Defaults[.intentsEnabled] = savedEnabled
+        history.delete(decorator)
+      }
+
+      await #expect(throws: AppIntentError.disabled) { _ = try await Delete().perform() }
+      await #expect(throws: AppIntentError.disabled) { _ = try await Clear().perform() }
+
+      #expect(history.items.count == countBefore)
+      #expect(history.items.contains { $0 == decorator })
+    }
+
     @Test("Image exports are unique, readable and revoked together")
     func imageExports() throws {
       defer { IntentImageExports.removeAll() }
+      let item = HistoryItem()
       let data = Data("test image".utf8)
-      let first = try IntentImageExports.write(data)
-      let second = try IntentImageExports.write(data)
+      let first = try IntentImageExports.write(data, for: item)
+      let second = try IntentImageExports.write(data, for: item)
       #expect(first != second)
       #expect(try Data(contentsOf: first) == data)
       #expect(try Data(contentsOf: second) == data)
@@ -76,6 +97,78 @@ extension SharedStateTests {
       #expect(!FileManager.default.fileExists(atPath: first.path))
       #expect(!FileManager.default.fileExists(atPath: second.path))
       IntentImageExports.removeAll()
+    }
+
+    @Test("Deleting an item removes only that item's exports")
+    func deleteRemovesOnlyOwnExports() throws {
+      defer { IntentImageExports.removeAll() }
+      let history = AppState.shared.history
+      let deleted = history.add(historyItem("export owner that is deleted"))
+      let kept = history.add(historyItem("export owner that is kept"))
+      defer { history.delete(kept) }
+      let data = Data("test image".utf8)
+      let deletedExport = try IntentImageExports.write(data, for: deleted.item)
+      let keptExport = try IntentImageExports.write(data, for: kept.item)
+
+      history.delete(deleted)
+
+      #expect(!FileManager.default.fileExists(atPath: deletedExport.path))
+      #expect(FileManager.default.fileExists(atPath: keptExport.path))
+    }
+
+    @Test("Exports survive a re-copy that replaces the item, and go when the replacement is deleted")
+    func exportsFollowDuplicateReplacement() throws {
+      defer { IntentImageExports.removeAll() }
+      let history = AppState.shared.history
+      let original = history.add(historyItem("exported then copied again"))
+      let export = try IntentImageExports.write(Data("test image".utf8), for: original.item)
+
+      let replacement = history.add(historyItem("exported then copied again"))
+
+      #expect(FileManager.default.fileExists(atPath: export.path))
+
+      history.delete(replacement)
+
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+    }
+
+    @Test("Clearing history removes every export")
+    func clearRemovesExports() throws {
+      let history = AppState.shared.history
+      let decorator = history.add(historyItem("export owner that is cleared"))
+      let export = try IntentImageExports.write(Data("test image".utf8), for: decorator.item)
+
+      history.clear()
+
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+    }
+
+    @Test("Launch sweep removes leftover exports and the legacy Documents export")
+    func launchSweepRemovesLeftovers() throws {
+      let data = Data("test image".utf8)
+      let leftover = try IntentImageExports.write(data, for: HistoryItem())
+      let legacy = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString)-image.png")
+      try data.write(to: legacy)
+
+      IntentImageExports.removeLeftovers(legacyExport: legacy)
+
+      #expect(!FileManager.default.fileExists(atPath: leftover.path))
+      #expect(!FileManager.default.fileExists(atPath: legacy.path))
+      #expect(IntentImageExports.legacyExport.lastPathComponent == "image.png")
+    }
+
+    private func historyItem(_ value: String) -> HistoryItem {
+      let item = HistoryItem()
+      Storage.shared.context.insert(item)
+      item.contents = [
+        HistoryItemContent(
+          type: NSPasteboard.PasteboardType.string.rawValue,
+          value: value.data(using: .utf8)
+        )
+      ]
+      item.numberOfCopies = 1
+      item.title = item.generateTitle()
+      return item
     }
   }
 }

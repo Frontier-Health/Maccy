@@ -57,7 +57,7 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
         text: item.text,
         html: item.htmlData,
         file: item.fileURLs.first,
-        image: try item.imageData.map { try IntentImageExports.write($0) },
+        image: try item.imageData.map { try IntentImageExports.write($0, for: item) },
         rtf: item.rtfData
       )
     }

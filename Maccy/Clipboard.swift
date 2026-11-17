@@ -235,10 +235,13 @@ class Clipboard {
     guard !ignoreRules.rejects(items) else { return }
 
     // The record keeps one value per type: the one from the first pasteboard
-    // item that has the type, which is the one `NSPasteboard.data(forType:)`
-    // and `string(forType:)` hand to an app pasting this copy. Later values of
-    // the same type are not read. File URLs are the exception: a Finder copy
-    // of several files has one item per file, and every distinct file is kept
+    // item that has the type, so what is shown is what is pasted. For HTML,
+    // RTF and images that is also what `NSPasteboard.data(forType:)` hands an
+    // app pasting the original copy. For plain text that API joins every
+    // item's string with newlines; Maccy keeps only the first, so it never
+    // doubles text that apps (BBEdit, Edge) put in two items. Later values of
+    // a type are not read. File URLs are the exception: a Finder copy of
+    // several files has one item per file, and every distinct file is kept
     // and pasted back as its own item.
     var contents = [HistoryItemContent]()
     var capturedTypes = Set<NSPasteboard.PasteboardType>()

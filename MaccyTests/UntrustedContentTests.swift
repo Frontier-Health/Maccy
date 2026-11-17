@@ -63,8 +63,8 @@ extension SharedStateTests {
       second.setString("other text", forType: .string)
       pasteboard.clearContents()
       pasteboard.writeObjects([first, second])
-      // What any app pasting the original copy receives.
-      #expect(pasteboard.string(forType: .string) == "shown text")
+      // The classic plain-text API joins both items; Maccy keeps the first.
+      #expect(pasteboard.string(forType: .string) == "shown text\nother text")
 
       let copied = try #require(checkNow().first)
       let decorator = History.shared.added(copied)

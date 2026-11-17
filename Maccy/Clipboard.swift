@@ -229,70 +229,30 @@ class Clipboard {
     // so it's better to merge all data into a single record.
     // - https://github.com/p0deje/Maccy/issues/78
     // - https://github.com/p0deje/Maccy/issues/472
-    // Ignore rules read the text of the string, file URL, RTF and HTML
-    // representations whatever the storage setting, without storing it.
+    // The record keeps one value per type, the first item's, so what is shown
+    // is what is pasted; every distinct copied file is kept. Only the
+    // allow-list is read, each representation once, and each is checked
+    // against the size limits before anything decodes it (see
+    // PasteboardCopyRead). That also leaves out the Microsoft Word link types
+    // and PDF that bookmarks and cross-references add
+    // (https://github.com/p0deje/Maccy/issues/613,
+    // https://github.com/p0deje/Maccy/issues/770).
     let items = pasteboard.pasteboardItems ?? []
-    guard !ignoreRules.rejects(items) else { return }
-
-    // The record keeps one value per type: the one from the first pasteboard
-    // item that has the type, so what is shown is what is pasted. For HTML,
-    // RTF and images that is also what `NSPasteboard.data(forType:)` hands an
-    // app pasting the original copy. For plain text that API joins every
-    // item's string with newlines; Maccy keeps only the first, so it never
-    // doubles text that apps (BBEdit, Edge) put in two items. Later values of
-    // a type are not read. File URLs are the exception: a Finder copy of
-    // several files has one item per file, and every distinct file is kept
-    // and pasted back as its own item.
-    var contents = [HistoryItemContent]()
-    var capturedTypes = Set<NSPasteboard.PasteboardType>()
-    var capturedFileURLs = Set<Data>()
-    var duplicatesDropped = 0
-    // Size limits (see ContentLimits), checked as each representation is read.
-    var tally = ContentLimits.Tally()
-    var violation: ContentLimits.Violation?
-    reading: for item in items {
-      let types = Set(item.types)
-      // Only representations that would be stored are read for this check.
-      if allowList.allows(.string) && types.contains(.string) && isEmptyString(item) &&
-          !richText(item, storing: allowList) {
-        continue
-      }
-
-      // Only the allow-list is stored. Beyond the reads above, the data of any
-      // other representation is never read. That also leaves out the Microsoft
-      // Word link types and PDF that bookmarks and cross-references add
-      // (https://github.com/p0deje/Maccy/issues/613,
-      // https://github.com/p0deje/Maccy/issues/770).
-      for type in item.types {
-        guard allowList.allows(type) else { continue }
-        if type != .fileURL && capturedTypes.contains(type) {
-          duplicatesDropped += 1
-          continue
-        }
-        guard case .store(let value) = allowList.admission(of: type, value: item.data(forType: type)) else {
-          continue
-        }
-        if let exceeded = tally.add(type, bytes: value?.count ?? 0) {
-          violation = exceeded
-          break reading
-        }
-        if type == .fileURL {
-          // A file URL without data has nothing to paste.
-          guard let value else { continue }
-          guard capturedFileURLs.insert(value).inserted else {
-            duplicatesDropped += 1
-            continue
-          }
-        }
-        capturedTypes.insert(type)
-        contents.append(HistoryItemContent(type: type.rawValue, value: value))
-      }
-    }
+    let copy = PasteboardCopyRead.read(items, storing: allowList)
     // A copy over a limit is not recorded at all, and doesn't use up skip next.
-    if let violation {
+    if let violation = copy.violation {
       logger.warning("Copy not recorded: \(violation.description)")
+      Notifier.notifyCopyTooLarge()
       return
     }
+
+    // Ignore rules read the text of the string, file URL, RTF and HTML
+    // representations of every item whatever the storage setting, without
+    // storing it, reusing the bytes already read.
+    guard !ignoreRules.rejects(items, reading: copy.data(item:type:)) else { return }
+
+    let contents = copy.contents(storing: allowList)
+    let duplicatesDropped = copy.duplicatesDropped + copy.duplicateFileURLs
     if duplicatesDropped > 0 {
       logger.info(
         "Copy of \(items.count) pasteboard items kept one value per type; \(duplicatesDropped) duplicates not stored"
@@ -359,30 +319,6 @@ class Clipboard {
     } else {
       return Defaults[.ignoredApps].contains(sourceAppBundle)
     }
-  }
-
-  private func isEmptyString(_ item: NSPasteboardItem) -> Bool {
-    guard let string = item.string(forType: .string) else {
-      return true
-    }
-
-    return string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-  }
-
-  private func richText(_ item: NSPasteboardItem, storing allowList: StorageAllowList) -> Bool {
-    // RTF is imported only within RichTextImport's bounds. HTML is scanned,
-    // never rendered, so nothing it refers to is loaded.
-    if allowList.allows(.rtf), let rtf = item.data(forType: .rtf) {
-      if let text = RichTextImport.text(fromRTF: rtf) {
-        return !text.isEmpty
-      }
-    }
-
-    if allowList.allows(.html), let html = item.data(forType: .html) {
-      return ClipboardHTMLText.hasContent(html)
-    }
-
-    return false
   }
 
   // Some applications requires window be unfocused and focused back to sync the clipboard.

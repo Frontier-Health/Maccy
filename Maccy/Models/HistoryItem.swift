@@ -93,13 +93,19 @@ class HistoryItem {
   @Relationship(deleteRule: .cascade, inverse: \HistoryItemContent.item)
   var contents: [HistoryItemContent] = []
 
-  @Transient private var cachedDecodedImage: NSImage?
-  // Where the cached image was decoded from, so a cache made from a
-  // representation that has since been removed or disallowed is never used.
-  @Transient private var cachedDecodedImageSource: HistoryItemImageSource?
+  // What `ValidatedImage.inspect` found for the image read now, and which
+  // image that was, so a result for a representation that has since been
+  // removed or disallowed is never used. Nothing decoded is kept here: the
+  // decorators keep the thumbnail and preview they asked for.
+  @Transient private var cachedImageInspection: ImageInspectionCache?
   // The Universal Clipboard image file, once `loadImageIfNeeded()` has read
   // it off the main thread (nil data: it failed a check).
   @Transient private var universalClipboardFileData: UniversalClipboardFileData?
+  // The read of that file in progress, shared by everything waiting for it.
+  @Transient private var universalClipboardFileLoad: UniversalClipboardFileLoad?
+  // Raised by `clearDecodedImageCache()`. A load or decode that started under
+  // an earlier value is discarded when it completes.
+  @Transient private var imageGeneration = 0
 
   init(contents: [HistoryItemContent] = []) {
     self.firstCopiedAt = firstCopiedAt
@@ -428,11 +434,32 @@ class HistoryItem {
     #if DEBUG
     Self.recognitionStartsForTesting += 1
     #endif
-    Task {
-      if let recognizedText = await Self.recognizeText(imageData: imageData, fileURL: fileURL) {
+    let job = TextRecognitionJob()
+    Self.pendingTextRecognition[ObjectIdentifier(job)] = job
+    let task = Task {
+      let recognizedText = await Self.recognizeText(imageData: imageData, fileURL: fileURL, job: job)
+      Self.pendingTextRecognition[ObjectIdentifier(job)] = nil
+      if let recognizedText, !job.isCancelled {
         self.acceptRecognizedText(recognizedText, from: source)
       }
     }
+    #if DEBUG
+    Self.recognitionTasksForTesting.append(task)
+    #else
+    _ = task
+    #endif
+  }
+
+  // Recognitions queued or running. Cancelled together when text recognition
+  // is turned off or images may no longer be read.
+  private static var pendingTextRecognition: [ObjectIdentifier: TextRecognitionJob] = [:]
+
+  // Stops every queued recognition before it decodes anything or reaches
+  // Vision, cancels a Vision request already running, and discards results.
+  static func cancelAllTextRecognition() {
+    let jobs = pendingTextRecognition.values
+    pendingTextRecognition = [:]
+    jobs.forEach { $0.cancel() }
   }
 
   @MainActor
@@ -500,11 +527,65 @@ class HistoryItem {
     return titleText(readableBy: allowList)?.text ?? displayTitle(readableBy: allowList)
   }
 
+  // The plain text a text destination receives from an item that the title,
+  // preview and editor show as files or an image: a plain paste, a text field
+  // and the Get intent's text all get this, not the files or the image, so the
+  // preview shows it too. Nil when there are no files or image, or no text.
+  @MainActor
+  func textPastedInsteadOfShownContent(
+    readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList
+  ) -> String? {
+    guard !fileURLs(readableBy: allowList).isEmpty || imageSource(readableBy: allowList) != nil,
+          let text = text(readableBy: allowList), !text.isEmpty else {
+      return nil
+    }
+    return text
+  }
+
+  // Whether that text is something other than the names or paths of the
+  // item's own files (as Finder writes them): then a text destination gets
+  // text the preview doesn't otherwise show, and it warns.
+  @MainActor
+  func pastedTextIsNotFileNames(readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList) -> Bool {
+    guard let text = textPastedInsteadOfShownContent(readableBy: allowList) else {
+      return false
+    }
+    return !Self.isFileNamesOrPaths(text, of: fileURLs(readableBy: allowList))
+  }
+
+  // `text`, with line endings made "\n" and trailing whitespace ignored, is the
+  // file names (last path components) or full paths of `urls` joined by
+  // newlines, or the name or path of one of them (a copy of several pasteboard
+  // items keeps the first item's text, which is one file's).
+  nonisolated static func isFileNamesOrPaths(_ text: String, of urls: [URL]) -> Bool {
+    guard !urls.isEmpty else {
+      return false
+    }
+    func normalized(_ value: String) -> String {
+      var lines = value.replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+      while let last = lines.unicodeScalars.last, last.properties.isWhitespace {
+        lines.unicodeScalars.removeLast()
+      }
+      return lines
+    }
+    let names = urls.map(\.lastPathComponent)
+    let paths = urls.map(\.path)
+    let candidates = [names.joined(separator: "\n"), paths.joined(separator: "\n")] + names + paths
+    let shown = normalized(text)
+    return candidates.contains { normalized($0) == shown }
+  }
+
   // Whether a formatted paste could insert other text than the plain text
   // shown. Maccy shows the plain text when there is any; a formatted paste
   // delivers HTML or RTF, which the copying app may have made to say
-  // something else. Their visible letters and digits are compared with the
-  // plain text's (hidden HTML such as scripts and attributes is not).
+  // something else. The text extracted from each (HTML scanned, never
+  // rendered) is compared with the plain text after only
+  // `RichTextImport.comparableText`. Equal extracted text is not proof that a
+  // renderer shows the same, so it never yields an assurance: at best nothing
+  // is said (`.noTextDifference`), and when the formatted version uses
+  // anything that can change what is rendered the result is
+  // `.renderingNotChecked`.
   @MainActor
   func formattedTextComparison(
     readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList
@@ -513,30 +594,48 @@ class HistoryItem {
       return .notApplicable
     }
 
-    // One entry per formatted version; nil when it couldn't be read.
-    var formatted: [String?] = []
+    // One entry per formatted version: its text (nil when it couldn't be
+    // read) and whether it can render differently from that text.
+    var formatted: [(text: String?, mayRenderDifferently: Bool)] = []
     if let html = htmlData(readableBy: allowList) {
-      formatted.append(RichTextImport.text(fromHTML: html))
+      formatted.append((RichTextImport.text(fromHTML: html), RichTextImport.htmlMayRenderDifferently(html)))
     }
     if let rtf = rtfData(readableBy: allowList) {
-      formatted.append(RichTextImport.text(fromRTF: rtf))
+      formatted.append((RichTextImport.text(fromRTF: rtf), RichTextImport.rtfMayRenderDifferently(rtf)))
     }
     guard !formatted.isEmpty else {
       return .notApplicable
     }
 
     let shown = RichTextImport.comparableText(plain)
-    var result = FormattedTextComparison.same
-    for text in formatted {
-      guard let text else {
-        result = .notChecked
+    var notChecked = false
+    var renderingNotChecked = RichTextImport.containsInvisibleOrDirectionalScalars(plain)
+    for version in formatted {
+      guard let text = version.text else {
+        notChecked = true
         continue
       }
       if RichTextImport.comparableText(text) != shown {
         return .differs
       }
+      if version.mayRenderDifferently || RichTextImport.containsInvisibleOrDirectionalScalars(text) {
+        renderingNotChecked = true
+      }
     }
-    return result
+    if notChecked {
+      return .notChecked
+    }
+    return renderingNotChecked ? .renderingNotChecked : .noTextDifference
+  }
+
+  // Whether the plain text holds characters that are invisible or change
+  // text direction (see `RichTextImport.containsInvisibleOrDirectionalScalars`):
+  // a terminal or form receives them although the preview can't show them.
+  @MainActor
+  func plainTextHasInvisibleCharacters(
+    readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList
+  ) -> Bool {
+    text(readableBy: allowList).map(RichTextImport.containsInvisibleOrDirectionalScalars) ?? false
   }
 
   // MARK: Reading contents
@@ -597,7 +696,10 @@ class HistoryItem {
   }
 
   // Reads a Universal Clipboard image file off the main thread, once per file,
-  // so `image` and `imageData` can show it. Does nothing for other images.
+  // so `imageData` and the decoders can use it. Does nothing for other
+  // images. Concurrent callers share one read. `clearDecodedImageCache()`
+  // cancels a read in progress, and a read that completes after it is
+  // discarded.
   @MainActor
   func loadImageIfNeeded() async {
     guard case .universalClipboardFile(let url) = imageSource(readableBy: StoragePolicy.currentReadAllowList),
@@ -605,40 +707,80 @@ class HistoryItem {
       return
     }
 
-    let data = await UniversalClipboardFile.load(url)
+    let load: UniversalClipboardFileLoad
+    if let current = universalClipboardFileLoad, current.url == url {
+      load = current
+    } else {
+      universalClipboardFileLoad?.cancel()
+      load = UniversalClipboardFileLoad(url: url)
+      universalClipboardFileLoad = load
+    }
+    let generation = imageGeneration
+    let data = await load.value
+    guard generation == imageGeneration, universalClipboardFileLoad === load, !isDeleted else {
+      return
+    }
+    universalClipboardFileLoad = nil
     universalClipboardFileData = UniversalClipboardFileData(url: url, data: data)
   }
 
-  var image: NSImage? {
-    guard let source = imageSource(readableBy: StoragePolicy.currentReadAllowList) else {
-      if cachedDecodedImage != nil {
-        clearDecodedImageCache()
-      }
+  // What `ValidatedImage.inspect` found for the image that may be read now,
+  // from its header alone: nil when there is no image, it isn't loaded yet,
+  // or it is refused (too many images, too many pixels, unreadable).
+  @MainActor
+  var imageInspection: ValidatedImage.Inspection? {
+    guard let source = imageSource(readableBy: StoragePolicy.currentReadAllowList),
+          let data = imageData(from: source) else {
+      return nil
+    }
+    if let cached = cachedImageInspection, cached.source == source {
+      return cached.inspection
+    }
+    let inspection = try? ValidatedImage.inspect(data).get()
+    cachedImageInspection = ImageInspectionCache(source: source, inspection: inspection)
+    return inspection
+  }
+
+  // The pixel size of the image that would be decoded, without decoding it.
+  @MainActor
+  var imagePixelSize: NSSize? {
+    imageInspection.map { NSSize(width: $0.width, height: $0.height) }
+  }
+
+  // The image that may be read now, decoded for `purpose` through
+  // `ValidatedImage` off the main actor. Nil when there is none, it is
+  // refused, the calling task was cancelled, or meanwhile the item was
+  // deleted, its images were cleaned up, or the image may no longer be read.
+  @MainActor
+  func decodedImage(for purpose: ValidatedImage.Purpose) async -> DecodedImage? {
+    await loadImageIfNeeded()
+    let generation = imageGeneration
+    guard !Task.isCancelled, !isDeleted,
+          let source = imageSource(readableBy: StoragePolicy.currentReadAllowList),
+          let data = imageData(from: source) else {
       return nil
     }
 
-    if let image = cachedDecodedImage, cachedDecodedImageSource == source {
-      return image
-    }
-
-    // A decompression bomb (a small file declaring a huge image) is never
-    // decoded.
-    guard let data = imageData(from: source), ContentLimits.imageMayBeDecoded(data) else {
+    let decoded = await ValidatedImage.decode(data, for: purpose)
+    guard !Task.isCancelled, generation == imageGeneration, !isDeleted,
+          imageSource(readableBy: StoragePolicy.currentReadAllowList) == source else {
       return nil
     }
-
-    cachedDecodedImage = NSImage(data: data)
-    cachedDecodedImageSource = source
-    return cachedDecodedImage
+    return decoded
   }
 
   var rtfData: Data? { rtfData(readableBy: StoragePolicy.currentReadAllowList) }
   func rtfData(readableBy allowList: StorageAllowList) -> Data? { contentData([.rtf], readableBy: allowList) }
 
+  // Forgets the image's inspection and the Universal Clipboard file read,
+  // cancels a read in progress, and makes every load and decode still in
+  // flight discard its result.
   func clearDecodedImageCache() {
-    cachedDecodedImage?.recache()
-    cachedDecodedImage = nil
-    cachedDecodedImageSource = nil
+    imageGeneration += 1
+    cachedImageInspection = nil
+    universalClipboardFileLoad?.cancel()
+    universalClipboardFileLoad = nil
+    universalClipboardFileData = nil
   }
 
   var text: String? { text(readableBy: StoragePolicy.currentReadAllowList) }
@@ -743,49 +885,86 @@ class HistoryItem {
   )
 
   #if DEBUG
-  // How many recognitions were started, and the size of each image actually
+  // How many recognitions were started, their tasks, how many reached the
+  // queued work past its first check, and the size of each image actually
   // handed to Vision.
   @MainActor static var recognitionStartsForTesting = 0
+  @MainActor static var recognitionTasksForTesting: [Task<Void, Never>] = []
+  nonisolated(unsafe) static var recognitionWorkObserverForTesting: (@Sendable () -> Void)?
   nonisolated(unsafe) static var visionInputObserverForTesting: (@Sendable (Int) -> Void)?
+  // The serial queue recognition runs on, so tests can hold it.
+  nonisolated static var textRecognitionQueueForTesting: DispatchQueue { textRecognitionQueue }
   #endif
 
   /// Runs OCR on a dedicated queue so the blocking Vision call never occupies
   /// a thread of Swift's cooperative pool or the main thread.
-  nonisolated static func recognizeText(imageData: Data?, fileURL: URL?) async -> String? {
+  nonisolated static func recognizeText(
+    imageData: Data?,
+    fileURL: URL?,
+    job: TextRecognitionJob = TextRecognitionJob()
+  ) async -> String? {
     await withCheckedContinuation { continuation in
       textRecognitionQueue.async {
-        continuation.resume(returning: performTextRecognition(imageData: imageData, fileURL: fileURL))
+        continuation.resume(returning: performTextRecognition(imageData: imageData, fileURL: fileURL, job: job))
       }
     }
   }
 
-  nonisolated private static func performTextRecognition(imageData: Data?, fileURL: URL?) -> String? {
+  // Whether queued recognition may go on: the job wasn't cancelled, text
+  // recognition is on and every image type may still be stored. Read when
+  // the work starts and again just before Vision.
+  nonisolated private static func recognitionMayProceed(_ job: TextRecognitionJob) -> Bool {
+    guard !job.isCancelled, OCRSetting.current.isEnabled,
+          let allowList = StoragePolicy.current.allowList else {
+      return false
+    }
+    return StorageType.images.types.contains(where: allowList.allows)
+  }
+
+  nonisolated private static func performTextRecognition(
+    imageData: Data?,
+    fileURL: URL?,
+    job: TextRecognitionJob
+  ) -> String? {
+    guard recognitionMayProceed(job) else {
+      return nil
+    }
+    #if DEBUG
+    recognitionWorkObserverForTesting?()
+    #endif
+
     // A Universal Clipboard file is read here, on the recognition queue, with
     // every check `UniversalClipboardFile.read` makes.
     guard let data = imageData ?? fileURL.flatMap({ try? UniversalClipboardFile.read($0) }) else {
       return nil
     }
-    // Vision decodes the whole image: only within the pixel limit.
-    guard ContentLimits.imageMayBeDecoded(data) else {
+    // One validated image, decoded within the pixel limit; Vision never
+    // sees the original container.
+    guard recognitionMayProceed(job), let image = ValidatedImage.cgImage(from: data, for: .fullSize) else {
       return nil
     }
-    #if DEBUG
-    visionInputObserverForTesting?(data.count)
-    #endif
 
-    let requestHandler = VNImageRequestHandler(data: data)
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.automaticallyDetectsLanguage = true
 
+    guard recognitionMayProceed(job), job.begin(request) else {
+      return nil
+    }
+    defer { job.end() }
+    #if DEBUG
+    visionInputObserverForTesting?(data.count)
+    #endif
+
     do {
-      try requestHandler.perform([request])
+      try VNImageRequestHandler(cgImage: image).perform([request])
     } catch {
       print("Unable to perform the request: \(Notifier.redacted(error)).")
       return nil
     }
 
-    guard let observations = request.results else {
+    // A result that arrives after recognition was turned off is discarded.
+    guard recognitionMayProceed(job), let observations = request.results else {
       return nil
     }
 
@@ -793,6 +972,66 @@ class HistoryItem {
       .compactMap { $0.topCandidates(1).first?.string }
       .joined(separator: "\n")
   }
+}
+
+// One queued text recognition. Cancelling it stops the work before it
+// starts or reaches Vision, and cancels a Vision request already running.
+nonisolated final class TextRecognitionJob: @unchecked Sendable {
+  private let lock = NSLock()
+  private var cancelled = false
+  private var request: VNRequest?
+
+  var isCancelled: Bool { lock.withLock { cancelled } }
+
+  func cancel() {
+    let running = lock.withLock {
+      cancelled = true
+      return request
+    }
+    running?.cancel()
+  }
+
+  // Records the request about to run; false if the job is already cancelled.
+  func begin(_ request: VNRequest) -> Bool {
+    lock.withLock {
+      guard !cancelled else { return false }
+      self.request = request
+      return true
+    }
+  }
+
+  func end() {
+    lock.withLock { request = nil }
+  }
+}
+
+// One read of a Universal Clipboard file in the background, awaited by
+// everything that needs it and cancelled when the item's images are cleaned
+// up.
+final class UniversalClipboardFileLoad {
+  let url: URL
+  private let cancellation: UniversalClipboardFile.Cancellation
+  private let task: Task<Data?, Never>
+
+  init(url: URL) {
+    let cancellation = UniversalClipboardFile.Cancellation()
+    self.url = url
+    self.cancellation = cancellation
+    task = Task.detached { await UniversalClipboardFile.load(url, cancellation: cancellation) }
+  }
+
+  var value: Data? {
+    get async { await task.value }
+  }
+
+  func cancel() {
+    cancellation.cancel()
+  }
+}
+
+nonisolated struct ImageInspectionCache {
+  let source: HistoryItemImageSource
+  let inspection: ValidatedImage.Inspection?
 }
 
 nonisolated struct UniversalClipboardFileData {

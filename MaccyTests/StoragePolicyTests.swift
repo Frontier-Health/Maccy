@@ -598,15 +598,16 @@ extension SharedStateTests {
     }
 
     @Test("A decoded image is not reused once its type is disallowed or it is removed")
-    func imageCachesAreInvalidated() throws {
+    func imageCachesAreInvalidated() async throws {
       let decorator = History.shared.added(storedItem([.string: Data("caption".utf8), .png: try pngData()]))
-      #expect(decorator.item.image != nil)
-      decorator.sizeImages()
+      #expect(decorator.item.imagePixelSize != nil)
+      await decorator.sizeImages()
       #expect(decorator.thumbnailImage != nil)
 
       turn(.images, on: false)
-      // Before any clean-up the cached image is no longer handed out.
-      #expect(decorator.item.image == nil)
+      // Before any clean-up the image is no longer handed out or decoded.
+      #expect(decorator.item.imagePixelSize == nil)
+      #expect(await decorator.item.decodedImage(for: .preview) == nil)
       #expect(decorator.item.imageData == nil)
 
       #expect(History.shared.enforceStoragePolicy())
@@ -644,7 +645,7 @@ extension SharedStateTests {
       #expect(olderContents.image == nil)
       #expect(olderContents.text == "caption")
       #expect(Get.contents(of: both, readableBy: allowList).image == Data("png bytes".utf8))
-      #expect(older.image == nil)
+      #expect(older.imagePixelSize == nil)
     }
 
     @Test("A Universal Clipboard image file is read only while every image type may be read")

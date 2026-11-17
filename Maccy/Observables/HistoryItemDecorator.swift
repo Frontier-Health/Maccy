@@ -46,11 +46,13 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
 
   // A Universal Clipboard image counts before its file is read (in the
   // background); if the read fails the preview shows the broken-image symbol.
+  // Any other image counts if ValidatedImage accepts it, judged from its
+  // headers without decoding it.
   var hasImage: Bool {
     if case .universalClipboardFile = item.imageSource(readableBy: StoragePolicy.currentReadAllowList) {
       return true
     }
-    return item.image != nil
+    return item.imageInspection != nil
   }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }
@@ -64,6 +66,10 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   private(set) var previewText = SizedString("")
   // Worked out when the preview first asks, and again after the item changes.
   @ObservationIgnored private var cachedFormattedTextComparison: FormattedTextComparison?
+  @ObservationIgnored private var cachedTextWarnings: TextWarnings?
+  // Raised by `cleanupImages()`: an image generated for an earlier value is
+  // discarded.
+  @ObservationIgnored private var imageGeneration = 0
   var thumbnailImage: NSImage?
   var applicationImage: ApplicationImage
 
@@ -99,8 +105,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   // Describe the complete item independently of its potentially truncated visual content.
   var accessibilityLabel: String {
     var parts: [String] = []
-    if hasImage, let image = item.image {
-      let size = image.pixelSize
+    if hasImage, let size = item.imagePixelSize {
       parts.append(
         String(
           format: NSLocalizedString("history_item_image_accessibility_label_no_app", comment: ""),
@@ -140,37 +145,37 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     synchronizeItemText()
   }
 
+  // The thumbnail and preview are decoded off the main actor through
+  // ValidatedImage (`HistoryItem.decodedImage(for:)`), which shares one read
+  // of a Universal Clipboard file between them. A result is kept only if the
+  // task wasn't cancelled and `cleanupImages()` hasn't run since it started.
   @MainActor
   func ensureThumbnailImage() {
-    guard hasImage else {
+    guard hasImage, thumbnailImage == nil, thumbnailImageGenerationTask == nil else {
       return
     }
-    guard thumbnailImage == nil else {
-      return
-    }
-    guard thumbnailImageGenerationTask == nil else {
-      return
-    }
+    let generation = imageGeneration
     thumbnailImageGenerationTask = Task { [weak self] in
-      await self?.item.loadImageIfNeeded()
-      self?.generateThumbnailImage()
+      guard let decoded = await self?.item.decodedImage(for: .thumbnail),
+            let self, !Task.isCancelled, generation == self.imageGeneration else {
+        return
+      }
+      self.thumbnailImage = decoded.nsImage.resized(to: HistoryItemDecorator.thumbnailImageSize)
     }
   }
 
   @MainActor
   func ensurePreviewImage() {
-    guard hasImage else {
+    guard hasImage, previewImage == nil, previewImageGenerationTask == nil else {
       return
     }
-    guard previewImage == nil else {
-      return
-    }
-    guard previewImageGenerationTask == nil else {
-      return
-    }
+    let generation = imageGeneration
     previewImageGenerationTask = Task { [weak self] in
-      await self?.item.loadImageIfNeeded()
-      self?.generatePreviewImage()
+      guard let decoded = await self?.item.decodedImage(for: .preview),
+            let self, !Task.isCancelled, generation == self.imageGeneration else {
+        return
+      }
+      self.previewImage = decoded.nsImage.resized(to: HistoryItemDecorator.previewImageSize)
     }
   }
 
@@ -184,37 +189,29 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return previewImage
   }
 
+  // Generates the thumbnail and the preview and waits for both.
+  @MainActor
+  func sizeImages() async {
+    ensurePreviewImage()
+    ensureThumbnailImage()
+    _ = await previewImageGenerationTask?.result
+    _ = await thumbnailImageGenerationTask?.result
+  }
+
+  // Cancels image work in flight (including the item's file read) and drops
+  // every decoded image; work that completes later is discarded.
   @MainActor
   func cleanupImages() {
+    imageGeneration += 1
     thumbnailImageGenerationTask?.cancel()
     previewImageGenerationTask?.cancel()
+    thumbnailImageGenerationTask = nil
+    previewImageGenerationTask = nil
     thumbnailImage?.recache()
     previewImage?.recache()
     thumbnailImage = nil
     previewImage = nil
     item.clearDecodedImageCache()
-  }
-
-  @MainActor
-  private func generateThumbnailImage() {
-    guard let image = item.image else {
-      return
-    }
-    thumbnailImage = image.resized(to: HistoryItemDecorator.thumbnailImageSize)
-  }
-
-  @MainActor
-  private func generatePreviewImage() {
-    guard let image = item.image else {
-      return
-    }
-    previewImage = image.resized(to: HistoryItemDecorator.previewImageSize)
-  }
-
-  @MainActor
-  func sizeImages() {
-    generatePreviewImage()
-    generateThumbnailImage()
   }
 
   func highlight(_ query: String, _ ranges: [Range<String.Index>]) {
@@ -290,8 +287,37 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return comparison
   }
 
+  // Plain text the preview shows besides the files or image it is titled by,
+  // and what to warn about in the text a text destination receives.
+  struct TextWarnings {
+    // The text pasted instead of the files or image shown, if any.
+    let pastedText: SizedString?
+    // That text is something other than the item's file names or paths.
+    let pastedTextIsNotFileNames: Bool
+    // The plain text holds invisible or direction-changing characters.
+    let hasInvisibleCharacters: Bool
+  }
+
+  @MainActor
+  var textWarnings: TextWarnings {
+    if let cachedTextWarnings {
+      return cachedTextWarnings
+    }
+    let allowList = StoragePolicy.currentReadAllowList
+    let warnings = TextWarnings(
+      pastedText: item.textPastedInsteadOfShownContent(readableBy: allowList).map {
+        SizedString($0, maxParagraphBytes: Self.previewMaxParagraphSize)
+      },
+      pastedTextIsNotFileNames: item.pastedTextIsNotFileNames(readableBy: allowList),
+      hasInvisibleCharacters: item.plainTextHasInvisibleCharacters(readableBy: allowList)
+    )
+    cachedTextWarnings = warnings
+    return warnings
+  }
+
   private func synchronizeItemText() {
     cachedFormattedTextComparison = nil
+    cachedTextWarnings = nil
     previewText = withObservationTracking {
       SizedString(item.previewableText, maxParagraphBytes: Self.previewMaxParagraphSize)
     } onChange: { [weak self] in

@@ -135,14 +135,23 @@ final class IgnoreRules {
     }
   }
 
-  func rejects(_ items: [NSPasteboardItem]) -> Bool {
-    lastRejection = rejection(for: items)
+  // `read` returns a representation's bytes: the watcher passes the bytes it
+  // already read for a copy, so nothing is read twice, and reads the rest
+  // (later items' values of a type) only here, within the limits below.
+  func rejects(
+    _ items: [NSPasteboardItem],
+    reading read: (_ itemIndex: Int, _ type: NSPasteboard.PasteboardType) -> Data? = { _, _ in nil }
+  ) -> Bool {
+    lastRejection = rejection(for: items, reading: read)
     guard let lastRejection else { return false }
     logger.warning("Clipboard copy rejected: \(lastRejection.rawValue)")
     return true
   }
 
-  private func rejection(for items: [NSPasteboardItem]) -> Rejection? {
+  private func rejection(
+    for items: [NSPasteboardItem],
+    reading read: (Int, NSPasteboard.PasteboardType) -> Data?
+  ) -> Rejection? {
     refresh()
     guard !invalid else { return .invalidStoredRule }
     guard !expressions.isEmpty else { return nil }
@@ -151,10 +160,10 @@ final class IgnoreRules {
     var representations: [(NSPasteboard.PasteboardType, Data, NSPasteboardItem, Int)] = []
     var remainingData = Self.dataLimit
     var remainingRawRTF = Self.rawRTFDataLimit
-    for item in items {
+    for (itemIndex, item) in items.enumerated() {
       for type in Self.inspectedTypes where item.types.contains(type) {
         // An advertised but undelivered representation cannot be verified.
-        guard let data = item.data(forType: type) else { return .undecodable }
+        guard let data = read(itemIndex, type) ?? item.data(forType: type) else { return .undecodable }
         let charged: Int
         if type == .rtf {
           guard data.count <= remainingRawRTF else { return .rtfDataLimit }
@@ -207,7 +216,7 @@ final class IgnoreRules {
     }
     var plainKeys = Set<String>()
     var matchedPlain = false
-    for (type, data, item, charged) in representations.sorted(by: { entryPriority($0.0) < entryPriority($1.0) }) {
+    for (type, data, _, charged) in representations.sorted(by: { entryPriority($0.0) < entryPriority($1.0) }) {
       if type != .string && !matchedPlain {
         if let rejection = matchCandidates() { return rejection }
         plainKeys = Set(order)
@@ -218,7 +227,8 @@ final class IgnoreRules {
       let texts: [String]
       switch type {
       case .string:
-        guard let text = item.string(forType: .string) else { return .undecodable }
+        // Decoded as the stored text is (`HistoryItem.text`).
+        guard let text = String(data: data, encoding: .utf8) else { return .undecodable }
         texts = [text]
       case .fileURL:
         guard let url = URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true) else { return .undecodable }
@@ -226,7 +236,7 @@ final class IgnoreRules {
       case .rtf:
         guard charged <= remainingRTF else { deferredRejection = .rtfDataLimit; continue }
         remainingRTF -= charged
-        guard let text = NSAttributedString(rtf: data, documentAttributes: nil)?.string else {
+        guard let text = RichTextImport.rtfText(data) else {
           deferredRejection = .undecodable
           continue
         }

@@ -307,6 +307,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
     // Revoke files already handed out under an older policy, even if clean-up fails.
     IntentImageExports.removeAll()
+    // Text recognition of an image type no longer stored stops before Vision.
+    if !StorageType.images.types.allSatisfy(allowList.allows) {
+      HistoryItem.cancelAllTextRecognition()
+    }
 
     let result: StorageCleanUpResult
     do {

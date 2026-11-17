@@ -216,6 +216,20 @@ struct ItemEditorView: View {
           .disabled(isContentTooLarge || !isTextStorable)
           .padding(.horizontal, 8)
           .padding(.vertical, 6)
+      } else if let pastedText = item.textWarnings.pastedText {
+        // Files or an image that paste as other text: the text a text
+        // destination receives is shown too, read-only.
+        VStack(alignment: .leading, spacing: 6) {
+          Text("ContentIsNotText", tableName: "PinsSettings")
+            .foregroundStyle(.secondary)
+          PastedTextView(text: pastedText)
+          if let note = PreviewItemView.pastedTextNote(item.textWarnings.pastedTextIsNotFileNames) {
+            Label(note, systemImage: "exclamationmark.triangle.fill")
+              .fixedSize(horizontal: false, vertical: true)
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(12)
       } else {
         Text("ContentIsNotText", tableName: "PinsSettings")
           .foregroundStyle(.secondary)

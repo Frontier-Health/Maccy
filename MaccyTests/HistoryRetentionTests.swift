@@ -131,7 +131,7 @@ extension SharedStateTests {
       let identifier = newer.item.notificationID
       let export = try IntentImageExports.write(Data("image bytes".utf8), for: newer.item)
       try Storage.shared.save()
-      let shown = history.items.toArray()
+      let shown = shownItems()
 
       Storage.shared.saveFailureForTesting = InjectedSaveFailure()
       let removed: Bool
@@ -157,7 +157,7 @@ extension SharedStateTests {
 
       #expect(!removed)
       #expect(reporter.failures == [expected])
-      #expect(history.items.toArray() == shown)
+      #expect(shownItems() == shown)
       #expect(newer.item.contents.first?.value == Data("newer secret".utf8))
       try assertStored(["pinned survivor", "older secret", "newer secret"])
       #expect(FileManager.default.fileExists(atPath: export.path))
@@ -184,7 +184,7 @@ extension SharedStateTests {
       history.added(historyItem("first"))
       history.added(historyItem("second"))
       try Storage.shared.save()
-      let shown = history.items.toArray()
+      let shown = shownItems()
 
       Storage.shared.saveFailureForTesting = InjectedSaveFailure()
       if path == "delete" {
@@ -197,7 +197,7 @@ extension SharedStateTests {
       }
       Storage.shared.saveFailureForTesting = nil
 
-      #expect(history.items.toArray() == shown)
+      #expect(shownItems() == shown)
       try assertStored(["first", "second"])
       #expect(reporter.failures == [path == "delete" ? .delete : .clear])
     }
@@ -209,7 +209,7 @@ extension SharedStateTests {
       history.added(historyItem("one"))
       history.added(historyItem("two"))
       try Storage.shared.save()
-      let shown = history.items.toArray()
+      let shown = shownItems()
 
       Storage.shared.saveFailureForTesting = InjectedSaveFailure()
       Defaults[.size] = 1
@@ -217,7 +217,7 @@ extension SharedStateTests {
       try await history.load()
       Storage.shared.saveFailureForTesting = nil
 
-      #expect(history.items.toArray() == shown)
+      #expect(shownItems() == shown)
       try assertStored(["one", "two"])
       #expect(reporter.failures == [.trim])
       #expect(history.automaticRemovalFailedAt == start)
@@ -325,7 +325,7 @@ extension SharedStateTests {
       let old = history.added(historyItem("a year old", lastCopied: -24 * 365))
       try Storage.shared.save()
       #expect(history.purgeExpiredItems() == 0)
-      #expect(history.items.toArray() == [old])
+      #expect(shownItems() == [old.item])
     }
 
     @Test("Items last copied more than N hours ago are purged; newer ones and user-set pins are kept")
@@ -343,7 +343,7 @@ extension SharedStateTests {
       try Storage.shared.save()
 
       #expect(history.purgeExpiredItems() == 1)
-      #expect(Set(history.items.toArray()) == [recent, oldPinned])
+      #expect(Set(shownItems()) == [recent.item, oldPinned.item])
       try assertStored(["recent", "old pinned"])
       #expect(!FileManager.default.fileExists(atPath: export.path))
       #expect(client.removed.contains(identifier))
@@ -351,7 +351,7 @@ extension SharedStateTests {
       // Two more hours: the recent item expires too.
       clock.now = start.addingTimeInterval(2 * 3600)
       #expect(history.purgeExpiredItems() == 1)
-      #expect(history.items.toArray() == [oldPinned])
+      #expect(shownItems() == [oldPinned.item])
       #expect(reporter.failures.isEmpty)
     }
 
@@ -373,7 +373,7 @@ extension SharedStateTests {
       try Storage.shared.save()
 
       #expect(history.purgeExpiredItems() == 1)
-      #expect(history.items.toArray() == [recent])
+      #expect(shownItems() == [recent.item])
       try assertStored(["recent"])
     }
 
@@ -398,7 +398,7 @@ extension SharedStateTests {
 
       #expect(history.purgeExpiredItems() == 1)
       // Not forced: the user's pins are kept.
-      #expect(Set(history.items.toArray()) == [recent, pinned])
+      #expect(Set(shownItems()) == [recent.item, pinned.item])
     }
 
     @Test("Items stamped in the future after the clock moved backwards still expire")
@@ -418,7 +418,7 @@ extension SharedStateTests {
       // Without restamping this would be kept for another 30 days.
       clock.now = start.addingTimeInterval(25 * 3600)
       #expect(history.purgeExpiredItems() == 2)
-      #expect(history.items.toArray().isEmpty)
+      #expect(shownItems().isEmpty)
     }
 
     @Test("A failing purge keeps the items and alerts once per run of failures")
@@ -434,7 +434,7 @@ extension SharedStateTests {
       #expect(history.purgeExpiredItems() == nil)
       Storage.shared.saveFailureForTesting = nil
 
-      #expect(history.items.toArray() == [old])
+      #expect(shownItems() == [old.item])
       try assertStored(["expired"])
       #expect(reporter.failures == [.expiry])
       #expect(history.automaticRemovalFailedAt == start)
@@ -471,7 +471,7 @@ extension SharedStateTests {
 
       history.performLaunchMaintenance()
 
-      #expect(history.items.toArray() == [pinned])
+      #expect(shownItems() == [pinned.item])
       try assertStored(["pinned"])
       #expect(reporter.failures.isEmpty)
     }
@@ -526,6 +526,10 @@ extension SharedStateTests {
       } catch {
         failure = error
       }
+      // Drop every reference History holds to this store's models (the
+      // session log included) before the store goes away.
+      Storage.shared.saveFailureForTesting = nil
+      history.clearAll()
       Storage.replaceSharedForTesting(with: previous)
       try await history.load()
       try? FileManager.default.removeItem(at: directory)
@@ -569,20 +573,25 @@ extension SharedStateTests {
       #expect(Set(files).isSubset(of: ["Storage.sqlite", "Storage.sqlite-wal", "Storage.sqlite-shm"]))
 
       // What remains is intact, in this store and when opened afresh.
-      let stored = try Storage(storeURL: url).allItems()
+      // Kept alive while its models are read: they become unusable once
+      // their container is released.
+      let reopened = Storage(storeURL: url)
+      let stored = try reopened.allItems()
       if path == "clearAll" {
         #expect(stored.isEmpty)
         #expect(!contains(url, kept) && !contains(wal, kept))
         return
       }
-      #expect(history.items.toArray() == [pinned])
+      #expect(shownItems() == [pinned.item])
       #expect(stored.count == 1)
       #expect(stored.first?.pin == pinned.item.pin)
       #expect(stored.first?.contents.first?.value == Data(kept.utf8))
       // The shared store keeps working after compaction.
       history.added(historyItem("after compaction"))
       try Storage.shared.save()
-      #expect(try Storage(storeURL: url).allItems().count == 2)
+      let reopenedAgain = Storage(storeURL: url)
+      #expect(try reopenedAgain.allItems().count == 2)
+      withExtendedLifetime(reopened) {}
     }
 
     @Test("Compaction leaves an in-memory store alone")
@@ -593,6 +602,12 @@ extension SharedStateTests {
     }
 
     // MARK: Helpers
+
+    // The items shown, in order. Compared by item, since loading history
+    // rebuilds the decorators.
+    private func shownItems() -> [HistoryItem] {
+      history.items.map(\.item)
+    }
 
     private func historyItem(_ value: String, lastCopied hoursFromStart: Double? = nil) -> HistoryItem {
       let item = HistoryItem()

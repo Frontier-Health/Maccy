@@ -285,11 +285,17 @@ enum ClipboardHTMLText {
     var hidden: [UInt8] = []
     var media = false
     var index = 0
-    func appendHidden(_ range: Range<Int>) {
+    func appendHidden(_ range: Range<Int>, attribute: Bool = false) {
       let value = decodeEntities(String(decoding: bytes[range], as: UTF8.self))
       // Keep URL schemes/media types, but never regex-scan embedded binary payloads.
-      let sanitized = value.replacingOccurrences(of: "(?i)(data:[^,\\s]*,)[^\\s]*", with: "$1",
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      let sanitized: String
+      if attribute, trimmed.lowercased().hasPrefix("data:"), let comma = trimmed.firstIndex(of: ",") {
+        sanitized = String(trimmed[...comma])
+      } else {
+        sanitized = value.replacingOccurrences(of: "(?i)(data:[^,\\s]*,)[^\\s]*", with: "$1",
                                                  options: .regularExpression)
+      }
       if !hidden.isEmpty { hidden.append(32) }
       hidden.append(contentsOf: sanitized.utf8)
     }
@@ -338,7 +344,7 @@ enum ClipboardHTMLText {
             } else if isSpace(bytes[cursor]) || bytes[cursor] == 62 || bytes[cursor] == 60 { break }
             cursor += 1
           }
-          if attribute != "style" { appendHidden(valueStart..<cursor) }
+          if attribute != "style" { appendHidden(valueStart..<cursor, attribute: true) }
           if quote != nil && cursor < bytes.count { cursor += 1 }
         }
         if cursor == attributeStart { cursor += 1 }

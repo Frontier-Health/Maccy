@@ -506,7 +506,8 @@ extension SharedStateTests {
         #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#
       ]
       copyRichText("<p>ordinary text</p><img src='data:image/png;base64," +
-                   String(repeating: "A", count: 40_000) + "'><style>" +
+                   String(repeating: "A", count: 20_000) + "\n" +
+                   String(repeating: "A", count: 20_000) + "'><style>" +
                    String(repeating: "A", count: 100) + "</style>", type: .html)
       #expect(checkNow().count == 1)
       Defaults[.ignoreRegexp] = ["sk_live_"]
@@ -1342,6 +1343,7 @@ struct ClipboardHTMLTextTests {
     #expect(text.hidden.contains("https://x/secret"))
     #expect(text.hidden.contains("if(a < b) 'secret'"))
     #expect(text.hasContent)
+    #expect(ClipboardHTMLText.inspect("<img src='data:image/png;base64,AAAA BBBB'>").hidden == "data:image/png;base64,")
   }
 
   @Test("BOM-less UTF-16 beyond the ASCII signature is decoded; embedded NULs fail closed")

@@ -302,7 +302,7 @@ class Clipboard {
     }
 
     if let html = item.data(forType: .html) {
-      return ClipboardHTMLText.extract(html)?.isEmpty == false
+      return ClipboardHTMLText.hasContent(html)
     }
 
     return false

@@ -499,6 +499,43 @@ extension SharedStateTests {
       #expect(checkNow().count == 1)
     }
 
+    @Test("Embedded images and CSS stay usable; links, comments and scripts still protect secrets")
+    func hiddenHTMLWatcher() {
+      Defaults[.ignoreRegexp] = [
+        #"\b[A-Za-z0-9+/]{40,}={0,2}"#,
+        #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#
+      ]
+      copyRichText("<p>ordinary text</p><img src='data:image/png;base64," +
+                   String(repeating: "A", count: 20_000) + "\n" +
+                   String(repeating: "A", count: 20_000) + "'><style>" +
+                   String(repeating: "A", count: 100) + "</style>", type: .html)
+      #expect(checkNow().count == 1)
+      Defaults[.ignoreRegexp] = ["sk_live_"]
+      for html in ["<a href='https://example.org/sk_live_'>ordinary</a>",
+                   "<!--sk_live_--><p>ordinary</p>", "<script>sk_live_</script><p>ordinary</p>",
+                   "<a href=/it's>sk_live_</a><b>abc</b> don't",
+                   "<style><!-- /* Word's defs */ x{color:red} --></STYLE><p>sk_live_</p>"] {
+        copyRichText(html, type: .html)
+        #expect(checkNow().isEmpty)
+      }
+      for encoding in [String.Encoding.utf16LittleEndian, .utf16BigEndian] {
+        let html = String(repeating: "日本語", count: 100) + "<p>sk_live_</p>"
+        pasteboard.declareTypes([.html], owner: nil)
+        pasteboard.setData(html.data(using: encoding), forType: .html)
+        #expect(checkNow().isEmpty)
+      }
+    }
+
+    @Test("Image-only HTML beside empty plain text remains eligible without rules")
+    func imageOnlyHTML() {
+      for element in ["img", "svg", "video", "picture", "object", "canvas"] {
+        copyString("")
+        pasteboard.addTypes([.html], owner: nil)
+        pasteboard.setString("<meta charset='utf-8'><" + element + " src='data:image/png;base64,AAAA'>", forType: .html)
+        #expect(checkNow().count == 1)
+      }
+    }
+
     @Test("RTF-only text is blocked")
     func ignoreRTFOnly() throws {
       Defaults[.ignoreRegexp] = ["secret"]
@@ -553,9 +590,9 @@ extension SharedStateTests {
     @Test("Text and raw-data caps cover all items and rich-text markup")
     func ignoreAggregateAndDataLimits() {
       Defaults[.ignoreRegexp] = ["secret"]
-      let items = (0..<2).map { _ in
+      let items = (0..<2).map { index in
         let item = NSPasteboardItem()
-        item.setString(String(repeating: "a", count: IgnoreRules.textLimit / 2 + 1), forType: .string)
+        item.setString(String(repeating: "a", count: IgnoreRules.textLimit / 2 + 1) + String(index), forType: .string)
         return item
       }
       pasteboard.clearContents()
@@ -571,7 +608,7 @@ extension SharedStateTests {
       for html in ["<p>unclosed", "<!DOCTYPE html><p>safe</p>", "<p>&unknown;</p>",
                    "<!DOCTYPE x [<!ENTITY x 'secret'>]><p>&x;</p>"] {
         copyRichText(html, type: .html)
-        #expect(checkNow().count == (html.contains("secret") ? 0 : 1))
+        #expect(checkNow().count == 1)
       }
       copyRichText("not RTF", type: .rtf)
       #expect(checkNow().isEmpty)
@@ -660,7 +697,7 @@ extension SharedStateTests {
       }
       for html in ["pass<b>word</b>", "<p title=password>ordinary text</p>",
                    "<!--password--><p>ordinary</p>", "<script>password</script><p>ordinary</p>",
-                   "<style>password</style><p>ordinary</p>", "pass&#119;ord"] {
+                   "pass&#119;ord"] {
         copyRichText(html, type: .html)
         #expect(checkNow().isEmpty)
       }
@@ -1291,6 +1328,98 @@ struct ClipboardHTMLTextTests {
     #expect(ClipboardHTMLText.extract(Data([0xFF])) == nil)
     #expect(ClipboardHTMLText.extract(Data([0xEF, 0xBB, 0xBF]) + Data("pass<b>word</b>".utf8)) == "password")
     #expect(ClipboardHTMLText.extract(Data("text".utf8) + Data([0xFF])) == "text\u{FFFD}")
+  }
+
+  @Test("Hidden extraction excludes CSS/data payloads and tolerates raw-text elements and stray quotes")
+  func hiddenExtraction() {
+    let fragment = ClipboardHTMLText.inspect("<a href=/it's>sk_live_</a><b>abc</b> don't")
+    #expect(fragment.visible == "sk_live_abc don't")
+    #expect(fragment.hidden == "/it's")
+    #expect(ClipboardHTMLText.extract("<style><!-- /* Word's defs */ x{} --></STYLE>secret") == "secret")
+    let text = ClipboardHTMLText.inspect("<img src='data:image/png;base64,AAAA' style='secret'><a href='https://x/secret'>safe</a><!--secret--><script>if(a < b) 'secret'</SCRIPT>")
+    #expect(text.visible == "safe")
+    #expect(text.hidden.contains("data:image/png;base64,"))
+    #expect(!text.hidden.contains("AAAA"))
+    #expect(text.hidden.contains("https://x/secret"))
+    #expect(text.hidden.contains("if(a < b) 'secret'"))
+    #expect(text.hasContent)
+    #expect(ClipboardHTMLText.inspect("<img src='data:image/png;base64,AAAA BBBB'>").hidden == "data:image/png;base64,")
+  }
+
+  @Test("BOM-less UTF-16 beyond the ASCII signature is decoded; embedded NULs fail closed")
+  func utf16Nuls() throws {
+    let text = String(repeating: "日本語", count: 100) + "<b>secret</b>"
+    for encoding in [String.Encoding.utf16LittleEndian, .utf16BigEndian] {
+      let data = try #require(text.data(using: encoding))
+      #expect(ClipboardHTMLText.decode(data) == text)
+    }
+    #expect(ClipboardHTMLText.decode(Data([0, 0, 0, 0])) == nil)
+  }
+
+  @Test("Settings distinguish unreadable, too many and invalid rules; reset and add honor ownership")
+  func configurationStates() throws {
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let key = Defaults.Keys.ignoreRegexp.name
+    for raw: Any in ["foo", ["secret", 42] as [Any]] {
+      defaults.set(raw, forKey: key)
+      #expect(IgnoreRules.configurationIssue(in: defaults) == .unreadable)
+      #expect(!IgnoreRules.save("valid", in: defaults))
+      #expect(IgnoreRules.configurationIssue(in: defaults) == .unreadable)
+      #expect(IgnoreRules(preferences: defaults).rejects([]))
+      #expect(IgnoreRules.reset(in: defaults))
+      #expect(IgnoreRules.configurationIssue(in: defaults) == nil)
+    }
+    defaults.set(Array(repeating: "valid", count: IgnoreRules.ruleLimit + 1), forKey: key)
+    #expect(IgnoreRules.configurationIssue(in: defaults) == .tooManyRules)
+    #expect(IgnoreRules(preferences: defaults).rejects([]))
+    #expect(IgnoreRules.remove(at: 0, in: defaults))
+    #expect(IgnoreRules.configurationIssue(in: defaults) == nil)
+    defaults.set(["["], forKey: key)
+    #expect(IgnoreRules.configurationIssue(in: defaults) == .invalidRule)
+    let managed = try #require(ManagedDefaults(suiteName: suite + ".managed", forced: [key: "foo"]))
+    #expect(!IgnoreRules.reset(in: managed))
+    #expect(IgnoreRules.configurationIssue(in: managed) == .unreadable)
+  }
+
+  @Test("Text is counted once across plain, HTML and RTF, with trailing whitespace normalized")
+  func deduplicatedText() throws {
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(["secret"], forKey: Defaults.Keys.ignoreRegexp.name)
+    let text = String(repeating: "ordinary ", count: IgnoreRules.textLimit / 9 - 1)
+    let item = NSPasteboardItem()
+    item.setString(text + "\n", forType: .string)
+    item.setString("<span>" + text + "</span>", forType: .html)
+    let attributed = NSAttributedString(string: text)
+    item.setData(try #require(attributed.rtf(from: NSRange(location: 0, length: attributed.length),
+                                            documentAttributes: [:])), forType: .rtf)
+    #expect(!IgnoreRules(preferences: defaults).rejects([item]))
+  }
+
+  @Test("Cheap representations across all items precede RTF; RTF has its own aggregate byte cap")
+  func rtfCostBoundary() throws {
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(["secret"], forKey: Defaults.Keys.ignoreRegexp.name)
+    let rules = IgnoreRules(preferences: defaults)
+    let rtf = NSPasteboardItem()
+    rtf.setData(Data(repeating: 97, count: IgnoreRules.rtfDataLimit + 1), forType: .rtf)
+    let plain = NSPasteboardItem()
+    plain.setString("secret", forType: .string)
+    #expect(rules.rejects([rtf, plain]))
+    #expect(rules.lastRejection == .matchedRule)
+    plain.setString("<b>secret</b>", forType: .html)
+    plain.setString("ordinary", forType: .string)
+    #expect(rules.rejects([rtf, plain]))
+    #expect(rules.lastRejection == .matchedRule)
+    #expect(rules.rejects([rtf]))
+    #expect(rules.lastRejection == .rtfDataLimit)
+    defaults.set([], forKey: Defaults.Keys.ignoreRegexp.name)
+    #expect(!rules.rejects([rtf]))
   }
 
   @Test("Managed lists refuse replacement, addition and deletion without shadow writes")

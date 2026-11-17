@@ -8,6 +8,8 @@ struct IgnoreRegexpsSettingsView: View {
   @State private var drafts: [Int: String] = [:]
   @State private var selection: Int?
   @State private var saveFailed = false
+  @State private var confirmReset = false
+  @State private var issue = IgnoreRules.configurationIssue()
 
   private var managed: Bool { IgnoreRules.isManaged() }
 
@@ -48,15 +50,30 @@ struct IgnoreRegexpsSettingsView: View {
           removeSelection()
         }
       }.frame(width: 50)
-        .disabled(managed)
+        .disabled(managed || issue == .unreadable)
+
+      if issue == .unreadable && !managed {
+        Button { confirmReset = true } label: { Text("ResetIgnoreRules", tableName: "IgnoreSettings") }
+          .confirmationDialog(Text("ResetIgnoreRulesConfirmation", tableName: "IgnoreSettings"),
+                              isPresented: $confirmReset) {
+            Button(role: .destructive) {
+              if IgnoreRules.reset() {
+                drafts = [:]
+                selection = nil
+                saveFailed = false
+                issue = IgnoreRules.configurationIssue()
+              }
+            } label: { Text("ResetIgnoreRules", tableName: "IgnoreSettings") }
+          }
+      }
 
       if saveFailed {
         Text("InvalidIgnoreRuleDraft", tableName: "IgnoreSettings")
           .foregroundStyle(.red)
       }
-      if IgnoreRules().hasInvalidStoredRules {
+      if let issue {
         Label {
-          Text(managed ? "InvalidManagedIgnoreRule" : "InvalidIgnoreRule", tableName: "IgnoreSettings")
+          Text(message(for: issue), tableName: "IgnoreSettings")
         } icon: {
           Image(systemName: "exclamationmark.triangle.fill")
         }
@@ -73,6 +90,17 @@ struct IgnoreRegexpsSettingsView: View {
         .foregroundStyle(.gray)
         .controlSize(.small)
     }.padding()
+      .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+        issue = IgnoreRules.configurationIssue()
+      }
+  }
+
+  private func message(for issue: IgnoreRules.ConfigurationIssue) -> LocalizedStringKey {
+    switch issue {
+    case .unreadable: return managed ? "UnreadableManagedIgnoreRules" : "UnreadableIgnoreRules"
+    case .tooManyRules: return managed ? "TooManyManagedIgnoreRules" : "TooManyIgnoreRules"
+    case .invalidRule: return managed ? "InvalidManagedIgnoreRule" : "InvalidIgnoreRule"
+    }
   }
 
   private func removeSelection() {

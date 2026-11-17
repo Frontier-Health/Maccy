@@ -5,8 +5,9 @@ import Logging
 // Read the effective preferences on every event, rather than relying on delivery
 // of a notification from another process or a configuration profile.
 final class IgnoreRules {
-  static let textLimit = 128_000 // UTF-16 code units, summed across the event.
+  static let textLimit = 80_000 // Unique matching text, in UTF-16 code units across the event.
   static let dataLimit = 8 * 1_024 * 1_024 // Bytes, summed across the event's text representations.
+  static let rtfDataLimit = 512 * 1_024 // Aggregate RTF bytes, before invoking the importer.
   static let patternLimit = 4_096
   static let ruleLimit = 128
 
@@ -35,7 +36,9 @@ final class IgnoreRules {
   static func save(_ pattern: String, replacingAt index: Int? = nil,
                    in preferences: UserDefaults = Defaults.Keys.ignoreRegexp.suite) -> Bool {
     guard !isManaged(in: preferences), isValid(pattern) else { return false }
-    var patterns = preferences.object(forKey: Defaults.Keys.ignoreRegexp.name) as? [String] ?? []
+    let raw = preferences.object(forKey: Defaults.Keys.ignoreRegexp.name)
+    guard raw == nil || raw is [String] else { return false }
+    var patterns = raw as? [String] ?? []
     if let index {
       guard patterns.indices.contains(index) else { return false }
       patterns[index] = pattern
@@ -49,6 +52,26 @@ final class IgnoreRules {
 
   static func isManaged(in preferences: UserDefaults = Defaults.Keys.ignoreRegexp.suite) -> Bool {
     preferences.objectIsForced(forKey: Defaults.Keys.ignoreRegexp.name)
+  }
+
+  enum ConfigurationIssue: Equatable {
+    case unreadable
+    case tooManyRules
+    case invalidRule
+  }
+
+  static func configurationIssue(in preferences: UserDefaults = Defaults.Keys.ignoreRegexp.suite) -> ConfigurationIssue? {
+    guard let raw = preferences.object(forKey: Defaults.Keys.ignoreRegexp.name) else { return nil }
+    guard let patterns = raw as? [String] else { return .unreadable }
+    if patterns.count > ruleLimit { return .tooManyRules }
+    return patterns.allSatisfy(isValid) ? nil : .invalidRule
+  }
+
+  @discardableResult
+  static func reset(in preferences: UserDefaults = Defaults.Keys.ignoreRegexp.suite) -> Bool {
+    guard !isManaged(in: preferences) else { return false }
+    preferences.set([String](), forKey: Defaults.Keys.ignoreRegexp.name)
+    return true
   }
 
   @discardableResult
@@ -67,6 +90,7 @@ final class IgnoreRules {
     case invalidStoredRule = "invalid stored rule"
     case textLimit = "over text limit"
     case dataLimit = "over data limit"
+    case rtfDataLimit = "over RTF data limit"
     case undecodable
     case timeBudget = "time budget"
   }
@@ -131,28 +155,33 @@ final class IgnoreRules {
       }
     }
 
+    var remainingRTF = Self.rtfDataLimit
+    var seen = Set<String>()
     var remainingText = Self.textLimit
     var matchingBudget: Duration = .milliseconds(100)
-    for (type, data, item) in representations {
+    for (type, data, item) in representations.sorted(by: { entryPriority($0.0) < entryPriority($1.0) }) {
       let texts: [String]
       switch type {
       case .string:
         guard let text = item.string(forType: .string) else { return .undecodable }
         texts = [text]
       case .rtf:
+        guard data.count <= remainingRTF else { return .rtfDataLimit }
+        remainingRTF -= data.count
         guard let text = NSAttributedString(rtf: data, documentAttributes: nil)?.string else {
           return .undecodable
         }
         texts = [text]
       case .html:
         guard let source = ClipboardHTMLText.decode(data) else { return .undecodable }
-        // Check source length before extraction, then count both matching inputs.
-        guard source.utf16.count <= remainingText else { return .textLimit }
-        texts = [source, ClipboardHTMLText.extract(source)]
+        let extracted = ClipboardHTMLText.inspect(source)
+        texts = [extracted.visible, extracted.hidden]
       default:
         continue
       }
-      for text in texts {
+      for original in texts {
+        let text = Self.trimmingTrailingWhitespace(original)
+        guard seen.insert(text).inserted else { continue }
         let length = text.utf16.count
         guard length <= remainingText else { return .textLimit }
         remainingText -= length
@@ -161,20 +190,14 @@ final class IgnoreRules {
           let deadline = started.advanced(by: matchingBudget)
           if started >= deadline { return .timeBudget }
           var rejection: Rejection?
-          var progressCallbacks = 0
           expression.enumerateMatches(in: text, options: [.reportProgress, .reportCompletion],
                                       range: NSRange(location: 0, length: length)) { result, flags, stop in
-            if result != nil {
+            if ContinuousClock.now >= deadline {
+              rejection = .timeBudget
+            } else if result != nil {
               rejection = .matchedRule
             } else if flags.contains(.internalError) {
               rejection = .undecodable
-            } else {
-              progressCallbacks += 1
-              // Amortize clock reads during frequent ICU progress callbacks.
-              // Check every 64 callbacks and always on completion.
-              if (progressCallbacks % 64 == 0 || flags.contains(.completed)) && ContinuousClock.now >= deadline {
-                rejection = .timeBudget
-              }
             }
             if rejection != nil { stop.pointee = true }
           }
@@ -186,10 +209,24 @@ final class IgnoreRules {
     }
     return nil
   }
+
+  private func entryPriority(_ type: NSPasteboard.PasteboardType) -> Int {
+    type == .string ? 0 : (type == .html ? 1 : 2)
+  }
+
+  static func trimmingTrailingWhitespace(_ text: String) -> String {
+    var end = text.endIndex
+    while end > text.startIndex {
+      let previous = text.index(before: end)
+      guard text[previous].unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else { break }
+      end = previous
+    }
+    return String(text[..<end])
+  }
 }
 
 // A forward-only scanner, not an HTML renderer. No resource loading, DOM, or
-// external entity expansion. Raw source is matched too, including hidden text.
+// external entity expansion. Hidden text excludes CSS and data URI payloads.
 enum ClipboardHTMLText {
   static func decode(_ data: Data) -> String? {
     let prefix = Array(data.prefix(128))
@@ -199,24 +236,24 @@ enum ClipboardHTMLText {
     if prefix.starts(with: [0xFE, 0xFF]) {
       return String(data: data.dropFirst(2), encoding: .utf16BigEndian)
     }
-    // Clipboard HTML without a BOM commonly has alternating ASCII and NUL.
-    let pairs = prefix.count / 2
-    if pairs >= 2 {
-      let evenZeros = stride(from: 0, to: pairs * 2, by: 2).filter { prefix[$0] == 0 }.count
-      let oddZeros = stride(from: 1, to: pairs * 2, by: 2).filter { prefix[$0] == 0 }.count
-      if oddZeros > pairs / 2 && evenZeros == 0 {
-        return String(data: data, encoding: .utf16LittleEndian)
-      }
-      if evenZeros > pairs / 2 && oddZeros == 0 {
-        return String(data: data, encoding: .utf16BigEndian)
-      }
-    }
     let utf8 = prefix.starts(with: [0xEF, 0xBB, 0xBF]) ? data.dropFirst(3) : data
-    if let text = String(data: utf8, encoding: .utf8) { return text }
+    if let text = String(data: utf8, encoding: .utf8), !text.contains("\0") { return text }
+    if utf8.contains(0) {
+      // Both byte orders can yield non-NUL Unicode. Prefer the one preserving
+      // ASCII markup/text, even when a long non-ASCII prefix defeats sniffing.
+      return [String.Encoding.utf16LittleEndian, .utf16BigEndian]
+        .compactMap { String(data: data, encoding: $0) }
+        .filter { !$0.contains("\0") }
+        .max { asciiCount($0) < asciiCount($1) }
+    }
     // Repair isolated bad UTF-8 sequences, but don't treat wholly undecodable
     // bytes as an empty, safe document.
     let repaired = String(decoding: utf8, as: UTF8.self)
     return repaired.unicodeScalars.contains { $0.value != 0xFFFD } ? repaired : nil
+  }
+
+  private static func asciiCount(_ text: String) -> Int {
+    text.unicodeScalars.filter { (9...13).contains($0.value) || (32...126).contains($0.value) }.count
   }
 
   static func extract(_ data: Data) -> String? {
@@ -230,67 +267,123 @@ enum ClipboardHTMLText {
     "th", "thead", "tr", "ul"
   ]
 
-  static func extract(_ source: String) -> String {
+  struct Contents {
+    let visible: String
+    let hidden: String
+    let hasContent: Bool
+  }
+
+  static func hasContent(_ data: Data) -> Bool {
+    decode(data).map { inspect($0).hasContent } ?? false
+  }
+
+  static func extract(_ source: String) -> String { inspect(source).visible }
+
+  static func inspect(_ source: String) -> Contents {
     let bytes = Array(source.utf8)
-    var output: [UInt8] = []
-    output.reserveCapacity(bytes.count)
+    var visible: [UInt8] = []
+    var hidden: [UInt8] = []
+    var media = false
     var index = 0
-    var hidden: String?
-    while index < bytes.count {
-      if bytes[index] == 60 { // <
-        if hidden == nil && bytes[index...].starts(with: [60, 33, 45, 45]) {
-          index += 4
-          while index < bytes.count && !bytes[index...].starts(with: [45, 45, 62]) { index += 1 }
-          index = min(index + 3, bytes.count)
-          continue
-        }
-        let start = index
-        var cursor = index + 1
-        let closing = cursor < bytes.count && bytes[cursor] == 47
-        if closing { cursor += 1 }
-        let nameStart = cursor
-        while cursor < bytes.count && isName(bytes[cursor]) { cursor += 1 }
-        let name = cursor - nameStart <= 32
-          ? String(decoding: bytes[nameStart..<cursor], as: UTF8.self).lowercased() : ""
-        // A literal '<' (e.g. "a < 3") isn't a tag.
-        if nameStart == cursor && (cursor == bytes.count || bytes[cursor] != 33) {
-          if hidden == nil { output.append(60) }
-          index += 1
-          continue
-        }
-        var quote: UInt8?
-        while cursor < bytes.count {
-          let byte = bytes[cursor]
-          if let current = quote {
-            if byte == current { quote = nil }
-          } else if byte == 34 || byte == 39 {
-            quote = byte
-          } else if byte == 62 || byte == 60 {
-            break
-          }
-          cursor += 1
-        }
-        if let hiddenName = hidden {
-          if closing && name == hiddenName { hidden = nil }
-        } else {
-          if blocks.contains(name), output.last != 32 { output.append(32) }
-          if !closing && (name == "script" || name == "style") { hidden = name }
-        }
-        index = cursor < bytes.count && bytes[cursor] == 62 ? cursor + 1 : cursor
-        // Every iteration advances, including malformed tags at end of input.
-        if index == start { index += 1 }
-        continue
+    func appendHidden(_ range: Range<Int>, attribute: Bool = false) {
+      let value = decodeEntities(String(decoding: bytes[range], as: UTF8.self))
+      // Keep URL schemes/media types, but never regex-scan embedded binary payloads.
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      let sanitized: String
+      if attribute, trimmed.lowercased().hasPrefix("data:"), let comma = trimmed.firstIndex(of: ",") {
+        sanitized = String(trimmed[...comma])
+      } else {
+        sanitized = value.replacingOccurrences(of: "(?i)(data:[^,\\s]*,)[^\\s]*", with: "$1",
+                                                 options: .regularExpression)
       }
-      if hidden != nil {
+      if !hidden.isEmpty { hidden.append(32) }
+      hidden.append(contentsOf: sanitized.utf8)
+    }
+    while index < bytes.count {
+      guard bytes[index] == 60 else {
+        visible.append(bytes[index])
         index += 1
         continue
       }
-      if bytes[index] == 38 { // &; bound lookahead so malformed entities stay linear.
+      if bytes[index...].starts(with: [60, 33, 45, 45]) {
+        let start = index + 4
+        index = start
+        while index < bytes.count && !bytes[index...].starts(with: [45, 45, 62]) { index += 1 }
+        appendHidden(start..<index)
+        index = min(index + 3, bytes.count)
+        continue
+      }
+      var cursor = index + 1
+      let closing = cursor < bytes.count && bytes[cursor] == 47
+      if closing { cursor += 1 }
+      let nameStart = cursor
+      while cursor < bytes.count && isName(bytes[cursor]) { cursor += 1 }
+      let name = String(decoding: bytes[nameStart..<cursor], as: UTF8.self).lowercased()
+      if nameStart == cursor && (cursor == bytes.count || bytes[cursor] != 33) {
+        visible.append(60)
+        index += 1
+        continue
+      }
+      if !closing && ["img", "svg", "video", "picture", "object", "canvas"].contains(name) { media = true }
+      // Parse attributes; quotes are special only at the start of a value after '='.
+      while cursor < bytes.count && bytes[cursor] != 62 && bytes[cursor] != 60 {
+        if isSpace(bytes[cursor]) || bytes[cursor] == 47 { cursor += 1; continue }
+        let attributeStart = cursor
+        while cursor < bytes.count && !isSpace(bytes[cursor]) && ![61, 62, 60].contains(bytes[cursor]) { cursor += 1 }
+        let attribute = String(decoding: bytes[attributeStart..<cursor], as: UTF8.self).lowercased()
+        while cursor < bytes.count && isSpace(bytes[cursor]) { cursor += 1 }
+        if cursor < bytes.count && bytes[cursor] == 61 {
+          cursor += 1
+          while cursor < bytes.count && isSpace(bytes[cursor]) { cursor += 1 }
+          let quote: UInt8? = cursor < bytes.count && [34, 39].contains(bytes[cursor]) ? bytes[cursor] : nil
+          if quote != nil { cursor += 1 }
+          let valueStart = cursor
+          while cursor < bytes.count {
+            if let quote {
+              if bytes[cursor] == quote { break }
+            } else if isSpace(bytes[cursor]) || bytes[cursor] == 62 || bytes[cursor] == 60 { break }
+            cursor += 1
+          }
+          if attribute != "style" { appendHidden(valueStart..<cursor, attribute: true) }
+          if quote != nil && cursor < bytes.count { cursor += 1 }
+        }
+        if cursor == attributeStart { cursor += 1 }
+      }
+      if blocks.contains(name), visible.last != 32 { visible.append(32) }
+      index = cursor < bytes.count && bytes[cursor] == 62 ? cursor + 1 : cursor
+      if !closing && (name == "script" || name == "style") {
+        let contentStart = index
+        // Raw-text elements recognize only their own closing tag; quotes/comments
+        // and '<' within the body cannot hide the rest of an Office document.
+        let terminator = Array(("</" + name).utf8)
+        while index < bytes.count {
+          if bytes[index] == 60 && index + terminator.count <= bytes.count {
+            let candidate = bytes[index..<(index + terminator.count)].map { (65...90).contains($0) ? $0 + 32 : $0 }
+            let end = index + terminator.count
+            if candidate == terminator && (end == bytes.count || isSpace(bytes[end]) || bytes[end] == 62) { break }
+          }
+          index += 1
+        }
+        if name == "script" { appendHidden(contentStart..<index) }
+      }
+    }
+    let text = decodeEntities(String(decoding: visible, as: UTF8.self))
+    return Contents(visible: text, hidden: String(decoding: hidden, as: UTF8.self),
+                    hasContent: media || !text.isEmpty)
+  }
+
+  private static func isSpace(_ byte: UInt8) -> Bool { [9, 10, 12, 13, 32].contains(byte) }
+
+  private static func decodeEntities(_ source: String) -> String {
+    let bytes = Array(source.utf8)
+    var output: [UInt8] = []
+    var index = 0
+    while index < bytes.count {
+      if bytes[index] == 38 {
         var end = index + 1
         while end < bytes.count && end - index <= 32 && isEntityByte(bytes[end]) { end += 1 }
-        if end < bytes.count && bytes[end] == 59,
-           let entity = entity(bytes[(index + 1)..<end]) {
-          output.append(contentsOf: entity.utf8)
+        if end < bytes.count && bytes[end] == 59, let decoded = entity(bytes[(index + 1)..<end]) {
+          output.append(contentsOf: decoded.utf8)
           index = end + 1
           continue
         }

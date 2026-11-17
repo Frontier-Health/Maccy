@@ -773,7 +773,7 @@ extension SharedStateTests {
       Storage.shared.saveFailureForTesting = InjectedSaveFailure()
       var readyBeforeLoad = true
       var alertsBeforeEnd = -1
-      LaunchSequence { step in
+      LaunchSequence { [self] step in
         switch step {
         case .applyStoragePolicy:
           history.beginLaunch()

@@ -250,7 +250,7 @@ class HistoryItem {
   }
 
   nonisolated private static let textRecognitionQueue = DispatchQueue(
-    label: "org.p0deje.Maccy.textRecognition",
+    label: AppIdentity.bundleIdentifier + ".textRecognition",
     qos: .utility
   )
 

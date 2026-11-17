@@ -1,11 +1,10 @@
 > [!WARNING]
-> **Beware of fake websites impersonating Maccy.** Malicious sites (such as `maccyapp.net` and `maccyapp.com`) distribute malware disguised as Maccy. [**maccy.app**](https://maccy.app) is the **only** official website.
+> This is Frontier Health’s MDM-only fork of [Maccy](https://github.com/p0deje/Maccy). Obtain staff packages through your organisation’s MDM. See [build identity](docs/build-identity.md) before packaging.
 
 <img width="128px" src="https://maccy.app/img/maccy/Logo.png" alt="Logo" />
 
-# [Maccy](https://maccy.app)
+# [Maccy](https://github.com/Frontier-Health/Maccy)
 
-[![Downloads](https://img.shields.io/github/downloads/p0deje/Maccy/total.svg)](https://github.com/p0deje/Maccy/releases/latest)
 [![Build Status](https://img.shields.io/bitrise/716921b669780314/master?token=3pMiCb5dpFzlO-7jTYtO3Q)](https://app.bitrise.io/app/716921b669780314)
 
 Maccy is a lightweight clipboard manager for macOS. It keeps the history of what you copy
@@ -69,7 +68,7 @@ Updates are delivered by MDM; the app has no self-updater.
 You can tell Maccy to ignore all copied items:
 
 ```sh
-defaults write org.p0deje.Maccy ignoreEvents true # default is false
+defaults write <ORG_BUNDLE_ID> ignoreEvents true # default is false
 ```
 
 This is useful if you have some workflow for copying sensitive data. You can set `ignoreEvents` to true, copy the data and set `ignoreEvents` back to false.
@@ -107,7 +106,7 @@ By default, Maccy checks clipboard every 500 ms, which should be enough for most
 to speed it up, you can change it with `defaults`:
 
 ```sh
-defaults write org.p0deje.Maccy clipboardCheckInterval 0.1 # 100 ms
+defaults write <ORG_BUNDLE_ID> clipboardCheckInterval 0.1 # 100 ms
 ```
 
 ## FAQ
@@ -134,7 +133,7 @@ defaults write org.p0deje.Maccy clipboardCheckInterval 0.1 # 100 ms
 If for some reason it doesn't work, run the following command in Terminal.app:
 
 ```sh
-defaults write org.p0deje.Maccy showFooter 1
+defaults write <ORG_BUNDLE_ID> showFooter 1
 ```
 
 ### How to ignore copies from [Universal Clipboard](https://support.apple.com/en-us/102430)?

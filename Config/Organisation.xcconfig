@@ -1,0 +1,7 @@
+// Replace <ORG_TEAM_ID> with your Apple Developer team ID. Empty permits ad-hoc CI builds.
+ORG_TEAM_ID =
+// Replace <ORG_BUNDLE_ID> with your organisation's reverse-DNS app identifier.
+// This buildable placeholder is for local development and CI only. Never distribute it.
+ORG_BUNDLE_ID = invalid.example.Maccy
+
+DEVELOPMENT_TEAM = $(ORG_TEAM_ID)

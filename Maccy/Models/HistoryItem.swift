@@ -149,7 +149,9 @@ class HistoryItem {
   // source is the user or a type `allowList` allows that the item still has;
   // otherwise one made now from what may be read (never recognising image
   // text), or a placeholder when nothing on the item may be read.
+  @MainActor
   var displayTitle: String { displayTitle(readableBy: StoragePolicy.currentReadAllowList) }
+  @MainActor
   func displayTitle(readableBy allowList: StorageAllowList) -> String {
     if titleSource == .user {
       return title
@@ -282,6 +284,7 @@ class HistoryItem {
 
   // Heals a title stored before unsafe scalars were removed on generation.
   // The source is unchanged. Returns whether the title changed.
+  @MainActor
   func removeScalarsUnsafeForTitleLayout() -> Bool {
     guard title.containsScalarsUnsafeForTitleLayout else {
       return false
@@ -382,6 +385,7 @@ class HistoryItem {
 
   // Shown in the preview and the menu bar. Falls back to the title that may
   // be shown, which for an image is the recognised text.
+  @MainActor
   var previewableText: String {
     let allowList = StoragePolicy.currentReadAllowList
     return titleText(readableBy: allowList)?.text ?? displayTitle(readableBy: allowList)

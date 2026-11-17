@@ -81,6 +81,9 @@ class HistoryItem {
   var pin: String?
   var title = ""
 
+  /// Opaque identifier used for this item's delivered notification. Random, never derived from content.
+  @Transient var notificationID = UUID().uuidString
+
   @Relationship(deleteRule: .cascade, inverse: \HistoryItemContent.item)
   var contents: [HistoryItemContent] = []
 

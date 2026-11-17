@@ -12,8 +12,24 @@ class Notifier {
     }
   }
 
-  static func notify(body: String?, sound: NSSound?) {
-    guard let body else { return }
+  /// Opaque, per-item notification identifier. It is generated randomly per item and is never
+  /// derived from clipboard content, so it is safe to hand to Notification Center.
+  static func identifier(for item: HistoryItem) -> String {
+    item.notificationID
+  }
+
+  /// Builds the notification content. Deliberately takes no clipboard-derived input: clipboard
+  /// text (passwords, tokens, patient data) must never reach Notification Center.
+  nonisolated static func makeContent(alertEnabled: Bool) -> UNMutableNotificationContent {
+    let content = UNMutableNotificationContent()
+    if alertEnabled {
+      content.body = String(localized: "notification_copied_body")
+    }
+    return content
+  }
+
+  static func notify(for item: HistoryItem, sound: NSSound?) {
+    let identifier = identifier(for: item)
 
     authorize()
 
@@ -24,12 +40,9 @@ class Notifier {
       let isAlertEnabled = settings.alertSetting == .enabled
       let isSoundEnabled = settings.soundSetting == .enabled
 
-      let content = UNMutableNotificationContent()
-      if isAlertEnabled {
-        content.body = body
-      }
+      let content = makeContent(alertEnabled: isAlertEnabled)
 
-      let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+      let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
       center.add(request) { error in
         if error != nil {
           NSLog("Failed to deliver notification: \(String(describing: error))")
@@ -40,5 +53,13 @@ class Notifier {
         }
       }
     }
+  }
+
+  static func removeDelivered(for item: HistoryItem) {
+    center.removeDeliveredNotifications(withIdentifiers: [identifier(for: item)])
+  }
+
+  static func removeAllDelivered() {
+    center.removeAllDeliveredNotifications()
   }
 }

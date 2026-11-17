@@ -469,6 +469,51 @@ extension SharedStateTests {
       )
     }
 
+    @Test("Notification content contains no clipboard content")
+    func notificationContentHasNoClipboardContent() {
+      let secret = "hunter2-API-TOKEN-4f9c1e"
+      let item = historyItem(secret, persisted: false)
+      #expect(item.title.contains(secret))
+
+      let identifier = Notifier.identifier(for: item)
+      for alertEnabled in [true, false] {
+        let content = Notifier.makeContent(alertEnabled: alertEnabled)
+        let everything = [
+          content.title,
+          content.subtitle,
+          content.body,
+          content.categoryIdentifier,
+          content.threadIdentifier,
+          content.summaryArgument,
+          content.targetContentIdentifier ?? "",
+          String(describing: content.userInfo),
+          identifier
+        ]
+        for field in everything {
+          #expect(!field.contains(secret))
+        }
+        #expect(content.userInfo.isEmpty)
+      }
+    }
+
+    @Test("Notification body is generic and only present when alerts are enabled")
+    func notificationBodyIsGeneric() {
+      #expect(!Notifier.makeContent(alertEnabled: true).body.isEmpty)
+      #expect(Notifier.makeContent(alertEnabled: false).body.isEmpty)
+    }
+
+    @Test("Notification identifiers are opaque and not derived from content")
+    func notificationIdentifiersAreOpaque() {
+      let first = historyItem("same content", persisted: false)
+      let second = historyItem("same content", persisted: false)
+
+      #expect(Notifier.identifier(for: first) == Notifier.identifier(for: first))
+      #expect(Notifier.identifier(for: first) != Notifier.identifier(for: second))
+      #expect(UUID(uuidString: Notifier.identifier(for: first)) != nil)
+      #expect(!Notifier.identifier(for: first).contains("same content"))
+      #expect(!Notifier.identifier(for: first).contains(first.title))
+    }
+
     private func historyItem(_ value: String, persisted: Bool = true) -> HistoryItem {
       let contents = [
         HistoryItemContent(

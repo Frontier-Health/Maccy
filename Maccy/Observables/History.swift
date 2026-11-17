@@ -150,7 +150,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func insertIntoStorage(_ item: HistoryItem) throws {
-    logger.info("Inserting item with id '\(item.title)'")
+    logger.info("Inserting history item \(item.notificationID)")
     Storage.shared.context.insert(item)
     Storage.shared.context.processPendingChanges()
     try? Storage.shared.context.save()
@@ -178,7 +178,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       if !item.fromMaccy {
         item.application = existingHistoryItem.application
       }
-      logger.info("Removing duplicate item '\(item.title)'")
+      logger.info("Removing duplicate of history item \(item.notificationID)")
       if let existingDecorator = firstStoredItem(where: { $0.item == existingHistoryItem }) {
         cleanup(existingDecorator)
         allUnpinnedItems.removeAll { $0 == existingDecorator }
@@ -189,7 +189,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       deleteFromStorage(existingHistoryItem)
     } else {
       Task {
-        Notifier.notify(body: item.title, sound: .write)
+        Notifier.notify(for: item, sound: .write)
       }
     }
 
@@ -273,6 +273,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       filteredUnpinnedItems.removeAll()
       pinManager.removeAll()
       sessionLog.removeAll()
+      Notifier.removeAllDelivered()
 
       do {
         let context = Storage.shared.context
@@ -343,6 +344,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   private func cleanup(_ item: HistoryItemDecorator) {
     item.cleanupImages()
+    Notifier.removeDelivered(for: item.item)
   }
 
   @MainActor
@@ -390,7 +392,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     pasteStack = stack
 
     logger.info("Initialising PasteStack with \(stack.items.count) items")
-    logger.info("Copying \(item.item.title) from PasteStack")
+    logger.info("Copying item 1 of \(stack.items.count) from PasteStack")
 
     if modifierFlags.isEmpty {
       AppState.shared.popup.close()
@@ -428,7 +430,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return
     }
 
-    logger.info("PasteStack pasted \(pasted.item.title)")
+    logger.info("PasteStack pasted an item")
 
     stack.items.removeFirst()
 
@@ -438,7 +440,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return
     }
 
-    logger.info("Copying \(item.item.title) from PasteStack. \(stack.items.count) items remaining in stack.")
+    logger.info("Copying next item from PasteStack. \(stack.items.count) items remaining in stack.")
 
     Task {
       if stack.modifierFlags.isEmpty {

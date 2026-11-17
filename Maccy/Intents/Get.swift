@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AppIntents
 
 nonisolated struct GetItemContents: Sendable, Equatable {
@@ -56,7 +57,9 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
       }
 
       let contents = Self.contents(of: item, readableBy: StoragePolicy.currentReadAllowList)
-      let imageURL = try contents.image.map { try IntentImageExports.write($0, for: item) }
+      // Stored images can be JPEG, HEIC or TIFF. The exported IntentFile promises PNG.
+      let pngData = contents.image.flatMap { NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:]) }
+      let imageURL = try pngData.map { try IntentImageExports.write($0, for: item) }
       return (contents, imageURL)
     }
 

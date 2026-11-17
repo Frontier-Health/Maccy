@@ -185,6 +185,42 @@ extension SharedStateTests {
       #expect(!FileManager.default.fileExists(atPath: export.path))
     }
 
+    @Test("Get exports an allowed JPEG as a real PNG file and deletion revokes it")
+    func getExportsPNGFromAllowedJPEG() async throws {
+      let savedStorage = SavedStoragePreference()
+      let savedEnabled = Defaults[.intentsEnabled]
+      let history = AppState.shared.history
+      history.clearAll()
+      Defaults[.intentsEnabled] = true
+      Defaults[.enabledPasteboardTypes] = [.jpeg]
+      defer {
+        history.clearAll()
+        savedStorage.restore()
+        Defaults[.intentsEnabled] = savedEnabled
+      }
+      let image = try #require(NSImage(named: "NSInfo"))
+      let tiff = try #require(image.tiffRepresentation)
+      let bitmap = try #require(NSBitmapImageRep(data: tiff))
+      let jpeg = try #require(bitmap.representation(using: .jpeg, properties: [:]))
+      let item = HistoryItem(contents: [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.jpeg.rawValue, value: jpeg)
+      ])
+      let decorator = history.added(item)
+      var get = Get()
+      get.selected = false
+      get.number = 1
+      let result = try await get.perform()
+      let entity = try #require(result.value)
+      let file = try #require(entity.image)
+      let url = try #require(file.fileURL)
+      let data = try Data(contentsOf: url)
+      #expect(Array(data.prefix(8)) == [137, 80, 78, 71, 13, 10, 26, 10])
+      #expect(NSBitmapImageRep(data: data) != nil)
+      #expect(item.contents.map(\.type) == [NSPasteboard.PasteboardType.jpeg.rawValue])
+      history.delete(decorator)
+      #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
     private func historyItem(_ value: String) -> HistoryItem {
       let item = HistoryItem()
       Storage.shared.context.insert(item)

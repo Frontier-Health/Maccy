@@ -66,6 +66,17 @@ struct PreviewItemView: View {
         }
       }
 
+      if let note = Self.formattedTextNote(item.formattedTextComparison) {
+        Label {
+          Text(note)
+            .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+          Image(systemName: "exclamationmark.triangle.fill")
+            .foregroundStyle(.orange)
+        }
+        .padding(.top, 6)
+      }
+
       Spacer(minLength: 0)
 
       Divider()
@@ -114,5 +125,30 @@ struct PreviewItemView: View {
       }
     }
     .controlSize(.small)
+  }
+
+  // English only; other locales fall back to it.
+  static func formattedTextNote(_ comparison: FormattedTextComparison) -> String? {
+    switch comparison {
+    case .notApplicable, .same:
+      return nil
+    case .differs:
+      return NSLocalizedString(
+        "FormattedTextDiffers",
+        tableName: "PreviewItemView",
+        value: "The formatted version of this copy contains different text from what is shown. " +
+          "Pasting with formatting may insert text that is not shown here; paste without formatting " +
+          "to insert exactly this text.",
+        comment: ""
+      )
+    case .notChecked:
+      return NSLocalizedString(
+        "FormattedTextNotChecked",
+        tableName: "PreviewItemView",
+        value: "The formatted version of this copy is too large to compare with the text shown. " +
+          "Paste without formatting to insert exactly this text.",
+        comment: ""
+      )
+    }
   }
 }

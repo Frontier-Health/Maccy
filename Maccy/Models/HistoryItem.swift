@@ -105,14 +105,73 @@ class HistoryItem {
     self.titleSourceValue = HistoryItemTitleSource.nothing.rawValue
   }
 
+  // Whether this item already holds everything `item` holds. Compared by the
+  // value each type is read as (see `canonicalContent(ofType:)`), so an older
+  // item with several values of one type only supersedes a copy of the value
+  // it shows and pastes.
   func supersedes(_ item: HistoryItem) -> Bool {
     return item.contents
       .filter { content in
         !Self.transientTypes.contains(content.type)
       }
       .allSatisfy { content in
-        contents.contains(where: { $0.type == content.type && $0.value == content.value })
+        if content.type == NSPasteboard.PasteboardType.fileURL.rawValue {
+          return contents.contains(where: { $0.type == content.type && $0.value == content.value })
+        }
+        return canonicalContent(ofType: content.type)?.value == content.value
       }
+  }
+
+  // MARK: One value per type
+  //
+  // A copy is stored with at most one value per type (see
+  // `Clipboard.checkForChangesInPasteboard()`), except `public.file-url`, which
+  // holds one value per copied file. Items stored before that rule may hold
+  // several values of one type. The store doesn't keep their order, so the one
+  // used is chosen from the values alone: the smallest by bytes. Every reader
+  // (title, preview, editor, Get) and copy-back use that same value.
+
+  func canonicalContent(ofType type: String) -> HistoryItemContent? {
+    Self.canonical(contents.filter { $0.type == type })
+  }
+
+  static func canonical(_ candidates: [HistoryItemContent]) -> HistoryItemContent? {
+    guard candidates.count > 1 else {
+      return candidates.first
+    }
+
+    return candidates.min { lhs, rhs in
+      switch (lhs.value, rhs.value) {
+      case (.some(let left), .some(let right)):
+        return left.lexicographicallyPrecedes(right)
+      case (.some, .none):
+        return true
+      default:
+        return false
+      }
+    }
+  }
+
+  // Whether the item holds more than one value of `type`.
+  func hasSeveralValues(ofType type: String) -> Bool {
+    contents.lazy.filter { $0.type == type }.prefix(2).count > 1
+  }
+
+  // What copy-back writes: the one value of each type `allowList` lets Maccy
+  // read, plus every distinct copied file, in a stable order.
+  func pasteboardContents(readableBy allowList: StorageAllowList) -> [HistoryItemContent] {
+    let fileURLType = NSPasteboard.PasteboardType.fileURL.rawValue
+    let types = Set(contents.map(\.type))
+      .filter { $0 != fileURLType && allowList.allows(NSPasteboard.PasteboardType($0)) }
+      .sorted()
+    var result = types.compactMap { canonicalContent(ofType: $0) }
+    if allowList.allows(.fileURL) {
+      var seen = Set<Data?>()
+      for content in contents where content.type == fileURLType && seen.insert(content.value).inserted {
+        result.append(content)
+      }
+    }
+    return result
   }
 
   // MARK: Titles
@@ -245,7 +304,10 @@ class HistoryItem {
     case .user:
       return true
     case .content(let type):
-      return allowList.allows(NSPasteboard.PasteboardType(type)) && contents.contains { $0.type == type }
+      // A title made from one of several values of a type may not be the
+      // value read now; it is made again from that one.
+      return allowList.allows(NSPasteboard.PasteboardType(type)) && contents.contains { $0.type == type } &&
+        (type == NSPasteboard.PasteboardType.fileURL.rawValue || !hasSeveralValues(ofType: type))
     case .universalClipboardImage:
       if case .universalClipboardFile = imageSource(readableBy: allowList) {
         return true
@@ -254,7 +316,10 @@ class HistoryItem {
     case .nothing:
       return false
     case .unknown:
-      return !contentsChanged && contents.allSatisfy { allowList.allows(NSPasteboard.PasteboardType($0.type)) }
+      return !contentsChanged && contents.allSatisfy { allowList.allows(NSPasteboard.PasteboardType($0.type)) } &&
+        !contents.contains {
+          $0.type != NSPasteboard.PasteboardType.fileURL.rawValue && hasSeveralValues(ofType: $0.type)
+        }
     }
   }
 
@@ -394,6 +459,45 @@ class HistoryItem {
     return titleText(readableBy: allowList)?.text ?? displayTitle(readableBy: allowList)
   }
 
+  // Whether a formatted paste could insert other text than the plain text
+  // shown. Maccy shows the plain text when there is any; a formatted paste
+  // delivers HTML or RTF, which the copying app may have made to say
+  // something else. Their visible letters and digits are compared with the
+  // plain text's (hidden HTML such as scripts and attributes is not).
+  @MainActor
+  func formattedTextComparison(
+    readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList
+  ) -> FormattedTextComparison {
+    guard let plain = text(readableBy: allowList) else {
+      return .notApplicable
+    }
+
+    // One entry per formatted version; nil when it couldn't be read.
+    var formatted: [String?] = []
+    if let html = htmlData(readableBy: allowList) {
+      formatted.append(RichTextImport.text(fromHTML: html))
+    }
+    if let rtf = rtfData(readableBy: allowList) {
+      formatted.append(RichTextImport.text(fromRTF: rtf))
+    }
+    guard !formatted.isEmpty else {
+      return .notApplicable
+    }
+
+    let shown = RichTextImport.comparableText(plain)
+    var result = FormattedTextComparison.same
+    for text in formatted {
+      guard let text else {
+        result = .notChecked
+        continue
+      }
+      if RichTextImport.comparableText(text) != shown {
+        return .differs
+      }
+    }
+    return result
+  }
+
   // MARK: Reading contents
   //
   // Every accessor reads only the representations the current storage policy
@@ -407,9 +511,11 @@ class HistoryItem {
       return []
     }
 
+    var seen = Set<Data>()
     return contents
       .filter { NSPasteboard.PasteboardType($0.type) == .fileURL && allowList.allows(.fileURL) }
       .compactMap { $0.value }
+      .filter { seen.insert($0).inserted }
       .compactMap { URL(dataRepresentation: $0, relativeTo: nil, isAbsolute: true) }
   }
 
@@ -517,13 +623,17 @@ class HistoryItem {
       return false
     }
 
+    // Exactly one plain-text value remains, the edited one: any other value,
+    // including a second plain-text value stored before one value per type
+    // was enforced, is deleted.
     let stringType = NSPasteboard.PasteboardType.string.rawValue
-    let removed = contents.filter { $0.type != stringType }
-    contents.removeAll { $0.type != stringType }
+    let kept = canonicalContent(ofType: stringType)
+    let removed = contents.filter { $0 !== kept }
+    contents.removeAll { $0 !== kept }
     removed.forEach { modelContext?.delete($0) }
 
-    if let index = contents.firstIndex(where: { $0.type == stringType }) {
-      contents[index].value = data
+    if let kept {
+      kept.value = data
     } else {
       contents.append(HistoryItemContent(type: stringType, value: data))
     }
@@ -556,14 +666,19 @@ class HistoryItem {
     universalClipboard && contentData([.html, .tiff, .png, .jpeg, .rtf, .string, .heic], readableBy: allowList) != nil
   }
 
+  // The value read for the first of `types` (in that order) that the item
+  // has and `allowList` allows. With several values of that type, the one
+  // `canonicalContent(ofType:)` picks.
   private func firstContent(
     _ types: [NSPasteboard.PasteboardType],
     readableBy allowList: StorageAllowList
   ) -> HistoryItemContent? {
-    contents.first { content in
-      let type = NSPasteboard.PasteboardType(content.type)
-      return types.contains(type) && allowList.allows(type)
+    for type in types where allowList.allows(type) {
+      if let content = canonicalContent(ofType: type.rawValue) {
+        return content
+      }
     }
+    return nil
   }
 
   // Metadata markers are always readable.

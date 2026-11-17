@@ -53,6 +53,8 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   var thumbnailImageGenerationTask: Task<(), Error>?
   var previewImage: NSImage?
   private(set) var previewText = SizedString("")
+  // Worked out when the preview first asks, and again after the item changes.
+  @ObservationIgnored private var cachedFormattedTextComparison: FormattedTextComparison?
   var thumbnailImage: NSImage?
   var applicationImage: ApplicationImage
 
@@ -264,7 +266,19 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     }
   }
 
+  // Whether a formatted paste could insert other text than the preview shows.
+  @MainActor
+  var formattedTextComparison: FormattedTextComparison {
+    if let cachedFormattedTextComparison {
+      return cachedFormattedTextComparison
+    }
+    let comparison = item.formattedTextComparison()
+    cachedFormattedTextComparison = comparison
+    return comparison
+  }
+
   private func synchronizeItemText() {
+    cachedFormattedTextComparison = nil
     previewText = withObservationTracking {
       SizedString(item.previewableText, maxParagraphBytes: Self.previewMaxParagraphSize)
     } onChange: { [weak self] in

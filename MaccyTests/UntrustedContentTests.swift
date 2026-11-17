@@ -1,0 +1,208 @@
+import AppKit
+import Defaults
+import SwiftData
+import Testing
+@testable import Maccy
+
+// A7: clipboard content is untrusted. What Maccy shows is what it pastes, and
+// reading a copy loads nothing, doesn't stall and doesn't exhaust memory.
+extension SharedStateTests {
+  @MainActor
+  final class UntrustedContentTests { // swiftlint:disable:this type_body_length
+    let clipboard = Clipboard.shared
+    let pasteboard = NSPasteboard.general
+    let preferences = Defaults.Keys.enabledPasteboardTypes.suite
+
+    let savedEnabledTypes = SavedStoragePreference()
+    let savedCaptureSettings = SavedCaptureSettings(Clipboard.shared.capturePreferences)
+    let savedIgnoreRegexp = Defaults[.ignoreRegexp]
+    let savedIgnoreAllAppsExceptListed = Defaults[.ignoreAllAppsExceptListed]
+    let savedIgnoredApps = Defaults[.ignoredApps]
+    let savedIgnoredPasteboardTypes = Defaults[.ignoredPasteboardTypes]
+
+    init() {
+      preferences.removeObject(forKey: StoragePolicy.preferenceKey)
+      Defaults[.ignoreRegexp] = []
+      Defaults[.ignoredApps] = []
+      Defaults[.ignoredPasteboardTypes] = []
+      Defaults[.ignoreAllAppsExceptListed] = false
+      savedCaptureSettings.clear()
+      clipboard.syncCaptureState()
+      clipboard.clearHooks()
+      try? Storage.shared.context.save()
+      History.shared.clearAll()
+      Storage.shared.saveFailureForTesting = nil
+      clipboard.afterInspectionForTesting = nil
+      History.shared.storageSettingChanged()
+    }
+
+    deinit {
+      savedEnabledTypes.restore()
+      savedCaptureSettings.restore()
+      Defaults[.ignoreRegexp] = savedIgnoreRegexp
+      Defaults[.ignoreAllAppsExceptListed] = savedIgnoreAllAppsExceptListed
+      Defaults[.ignoredApps] = savedIgnoredApps
+      Defaults[.ignoredPasteboardTypes] = savedIgnoredPasteboardTypes
+    }
+
+    // MARK: Group 1: one value per type
+
+    @Test("Two pasteboard items with different strings: one string is stored, shown and pasted everywhere")
+    func twoItemsWithDifferentStrings() throws {
+      let first = NSPasteboardItem()
+      first.setString("shown text", forType: .string)
+      let second = NSPasteboardItem()
+      second.setString("other text", forType: .string)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([first, second])
+      // What any app pasting the original copy receives.
+      #expect(pasteboard.string(forType: .string) == "shown text")
+
+      let copied = try #require(checkNow().first)
+      let decorator = History.shared.added(copied)
+      let item = decorator.item
+      #expect(stringValues(item) == ["shown text"])
+      expectReadsEverywhere(decorator, as: "shown text")
+    }
+
+    @Test("A formatted version with other text is flagged in the preview; the same text is not")
+    func formattedTextMismatchIsIndicated() throws {
+      let first = NSPasteboardItem()
+      first.setString("Pay Alice 100", forType: .string)
+      let second = NSPasteboardItem()
+      second.setString("<p><b>Pay Mallory 100</b></p>", forType: .html)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([first, second])
+
+      let decorator = History.shared.added(try #require(checkNow().first))
+      #expect(decorator.item.displayTitle == "Pay Alice 100")
+      #expect(decorator.formattedTextComparison == .differs)
+      #expect(PreviewItemView.formattedTextNote(.differs) != nil)
+
+      let same = NSPasteboardItem()
+      same.setString("Pay  Alice 100", forType: .string)
+      same.setString("<ul><li>Pay <i>Alice</i>&nbsp;100.</li></ul>", forType: .html)
+      let rtf = NSAttributedString(string: "Pay Alice 100")
+      same.setData(try #require(rtf.rtf(from: NSRange(location: 0, length: rtf.length))), forType: .rtf)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([same])
+      let sameDecorator = History.shared.added(try #require(checkNow().first))
+      #expect(sameDecorator.formattedTextComparison == .same)
+      #expect(PreviewItemView.formattedTextNote(.same) == nil)
+    }
+
+    @Test("A Finder copy of several files keeps and pastes every file, each once")
+    func multiFileCopyPastesAllFiles() throws {
+      let urls = ["/tmp/a7 first file.txt", "/tmp/a7-second.txt", "/tmp/a7-third.pdf"].map {
+        URL(fileURLWithPath: $0)
+      }
+      let items = (urls + [urls[0]]).map { url in
+        let item = NSPasteboardItem()
+        item.setData(url.dataRepresentation, forType: .fileURL)
+        return item
+      }
+      pasteboard.clearContents()
+      pasteboard.writeObjects(items)
+
+      let decorator = History.shared.added(try #require(checkNow().first))
+      let item = decorator.item
+      #expect(item.contents.filter { $0.type == NSPasteboard.PasteboardType.fileURL.rawValue }.count == 3)
+      #expect(Set(item.fileURLs) == Set(urls))
+
+      for removeFormatting in [false, true] {
+        clipboard.copy(item, removeFormatting: removeFormatting)
+        let pasted = (pasteboard.pasteboardItems ?? []).compactMap { pasteboardItem in
+          pasteboardItem.data(forType: .fileURL).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+        }
+        #expect(pasted.count == 3)
+        #expect(Set(pasted) == Set(urls))
+      }
+    }
+
+    @Test("An item stored with two values of one type reads, shows and pastes the same one",
+          arguments: [false, true])
+    func storedDuplicatesAgree(reversed: Bool) throws {
+      let values = ["zulu", "alpha"]
+      let item = HistoryItem()
+      Storage.shared.context.insert(item)
+      item.contents = (reversed ? values.reversed() : values).map {
+        HistoryItemContent(type: NSPasteboard.PasteboardType.string.rawValue, value: Data($0.utf8))
+      }
+      // A title an earlier version made from whichever value it read.
+      item.setTitle(reversed ? "alpha" : "zulu", source: .content(NSPasteboard.PasteboardType.string.rawValue))
+      try Storage.shared.context.save()
+
+      // The smallest value by bytes, whatever order the store returns.
+      let decorator = HistoryItemDecorator(item)
+      expectReadsEverywhere(decorator, as: "alpha")
+      item.setTitle("zulu", source: .unknown)
+      #expect(item.displayTitle == "alpha")
+
+      let reloaded = try #require(ModelContext(Storage.shared.container).model(for: item.persistentModelID)
+        as? HistoryItem)
+      #expect(reloaded.displayTitle == "alpha")
+      #expect(reloaded.pasteboardContents(readableBy: .everything).compactMap(\.value) == [Data("alpha".utf8)])
+
+      // A new copy of the value shown is a duplicate of it; a copy of the
+      // other value is not.
+      #expect(item.supersedes(HistoryItem(contents: [stringContent("alpha")])))
+      #expect(!item.supersedes(HistoryItem(contents: [stringContent("zulu")])))
+
+      // The editor saves exactly one string.
+      #expect(item.replaceText(with: Data("edited".utf8), storing: StoragePolicy.current))
+      #expect(stringValues(item) == ["edited"])
+      #expect(item.contents.count == 1)
+    }
+
+    // MARK: Helpers
+
+    // Title, list row, preview, editor, Get, formatted paste and plain paste
+    // all yield `text`, and each paste writes it exactly once.
+    private func expectReadsEverywhere(
+      _ decorator: HistoryItemDecorator,
+      as text: String,
+      sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+      let item = decorator.item
+      #expect(item.displayTitle == text, sourceLocation: sourceLocation)
+      #expect(decorator.title == text, sourceLocation: sourceLocation)
+      #expect(item.previewableText == text, sourceLocation: sourceLocation)
+      #expect(decorator.previewText.string == text, sourceLocation: sourceLocation)
+      // The editor starts from the preview text.
+      #expect(LargeTextView.EditorState(text: decorator.previewText.string).text == text,
+              sourceLocation: sourceLocation)
+      #expect(Get.contents(of: item, readableBy: StoragePolicy.currentReadAllowList).text == text,
+              sourceLocation: sourceLocation)
+
+      clipboard.copy(item)
+      #expect(pastedStrings() == [text], sourceLocation: sourceLocation)
+      clipboard.copy(item, removeFormatting: true)
+      #expect(pastedStrings() == [text], sourceLocation: sourceLocation)
+    }
+
+    private func stringValues(_ item: HistoryItem) -> [String] {
+      item.contents
+        .filter { $0.type == NSPasteboard.PasteboardType.string.rawValue }
+        .compactMap { $0.value.flatMap { String(data: $0, encoding: .utf8) } }
+    }
+
+    private func stringContent(_ text: String) -> HistoryItemContent {
+      HistoryItemContent(type: NSPasteboard.PasteboardType.string.rawValue, value: Data(text.utf8))
+    }
+
+    // Every plain-text value on the pasteboard, across all its items.
+    private func pastedStrings() -> [String] {
+      (pasteboard.pasteboardItems ?? []).compactMap { $0.string(forType: .string) }
+    }
+
+    // Runs one production watcher check now and returns what it recorded.
+    private func checkNow() -> [HistoryItem] {
+      var copies: [HistoryItem] = []
+      clipboard.clearHooks()
+      clipboard.onNewCopy { copies.append($0) }
+      clipboard.checkForChangesInPasteboard()
+      clipboard.clearHooks()
+      return copies
+    }
+  }
+}

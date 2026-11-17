@@ -48,7 +48,12 @@ class Storage {
   }
 
   func allItems() throws -> [HistoryItem] {
-    try context.fetch(FetchDescriptor<HistoryItem>())
+    #if DEBUG
+    if let fetchFailureForTesting {
+      throw fetchFailureForTesting
+    }
+    #endif
+    return try context.fetch(FetchDescriptor<HistoryItem>())
   }
 
   func unpinnedItems() throws -> [HistoryItem] {
@@ -104,65 +109,80 @@ class Storage {
   }
 
   // Asks SQLite to compact the store after history was deleted: the WAL is
-  // checkpointed and truncated, the database is rebuilt with VACUUM, and the
-  // WAL is truncated again. Rows deleted before this then no longer sit in
-  // the WAL or in free pages of the database file.
+  // checkpointed and truncated, free pages are removed from the database file
+  // (incremental vacuum, or VACUUM for a store without incremental
+  // auto-vacuum), and the WAL is truncated again. Rows deleted before this
+  // then no longer sit in the WAL or in free pages of the database file. See
+  // `StorageCompaction`.
   //
   // This is NOT secure erasure. The file system decides where the old bytes
   // physically were and when they are overwritten; SSD wear levelling, APFS
   // snapshots, Time Machine and other backups are out of Maccy's control.
   //
-  // Mechanism: a second SQLite connection to the same file, opened read-write
-  // without create, through the system SQLite library that Core Data also
-  // uses, so both connections share SQLite's per-process file locks. It runs
-  // on the main actor, where every save of this store runs synchronously, so
-  // no SwiftData save is in flight. SQLite's own locking keeps the two
-  // connections consistent: VACUUM takes an exclusive lock and is atomic, so if
-  // it fails (for example SQLITE_BUSY after the timeout) the database is left
-  // exactly as it was and the error is thrown. A checkpoint that cannot finish
-  // reports busy, which is thrown too. Nothing here deletes or rewrites rows,
-  // so remaining items, pinned ones included, are kept either way.
-  func compact() throws {
+  // Mechanism: a second SQLite connection to the same file. SwiftData
+  // exposes neither its connection nor Core Data's store options
+  // (`NSSQLitePragmasOption`), and Core Data's supported route
+  // (`NSSQLiteManualVacuumOption`) only vacuums when a store is added to a
+  // coordinator, which needs the SwiftData container closed; History holds
+  // its models for the whole session. Apple advises against using the SQLite
+  // API on a Core Data store directly, so this relies on behaviour Apple does
+  // not guarantee; the on-disk tests are the tripwire.
+  //
+  // It runs on a background thread (a full VACUUM of a 1 GB store took 12 s
+  // in a measurement; the incremental vacuum takes time in proportion to what
+  // was deleted). It can't overlap a save of this store: autosave is off
+  // while it runs, and every save through `save()` (and the other saves here)
+  // first stops it with `stopCompaction()`, which interrupts it and waits
+  // until its connection is closed. SQLite rolls an interrupted vacuum back,
+  // leaving the database as it was, and it throws
+  // `StorageCompactionError.interrupted`. Readers are not blocked: the store
+  // is in WAL mode.
+  //
+  // Nothing here deletes or rewrites rows, so remaining items, pinned ones
+  // included, are kept whether it succeeds or fails.
+  func compact() async throws {
     guard let storeURL, FileManager.default.fileExists(atPath: storeURL.path) else {
       return
     }
+    stopCompaction()
 
-    var database: OpaquePointer?
-    let opened = sqlite3_open_v2(storeURL.path, &database, SQLITE_OPEN_READWRITE, nil)
-    defer { sqlite3_close_v2(database) }
-    guard opened == SQLITE_OK, let database else {
-      throw StorageCompactionError(code: opened)
+    let job = StorageCompaction(url: storeURL, deadline: nil)
+    runningCompaction = job
+    let autosaveEnabled = context.autosaveEnabled
+    context.autosaveEnabled = false
+    defer {
+      if runningCompaction === job {
+        runningCompaction = nil
+      }
+      context.autosaveEnabled = autosaveEnabled
     }
-    sqlite3_busy_timeout(database, 2000)
-
-    try Self.checkpoint(database)
-    try Self.execute("VACUUM", in: database)
-    try Self.checkpoint(database)
+    try await job.runInBackground()
   }
 
-  private static func checkpoint(_ database: OpaquePointer) throws {
-    var statement: OpaquePointer?
-    let prepared = sqlite3_prepare_v2(database, "PRAGMA wal_checkpoint(TRUNCATE)", -1, &statement, nil)
-    defer { sqlite3_finalize(statement) }
-    guard prepared == SQLITE_OK else {
-      throw StorageCompactionError(code: prepared)
+  // Compacts on the calling thread, giving up (and rolling back) at
+  // `deadline` (system uptime). For quitting, when nothing else will save.
+  func compactNow(deadline: TimeInterval) throws {
+    guard let storeURL, FileManager.default.fileExists(atPath: storeURL.path) else {
+      return
     }
-    let stepped = sqlite3_step(statement)
-    guard stepped == SQLITE_ROW else {
-      throw StorageCompactionError(code: stepped)
-    }
-    // The first column is 1 if the checkpoint could not complete.
-    guard sqlite3_column_int(statement, 0) == 0 else {
-      throw StorageCompactionError(code: SQLITE_BUSY)
-    }
+    stopCompaction()
+    try StorageCompaction(url: storeURL, deadline: deadline).run()
   }
 
-  private static func execute(_ sql: String, in database: OpaquePointer) throws {
-    let result = sqlite3_exec(database, sql, nil, nil, nil)
-    guard result == SQLITE_OK else {
-      throw StorageCompactionError(code: result)
+  // Interrupts a compaction in progress and waits until its connection is
+  // closed, so a save can't overlap it.
+  func stopCompaction() {
+    guard let job = runningCompaction else {
+      return
     }
+    job.cancel()
+    job.waitUntilFinished()
+    runningCompaction = nil
   }
+
+  var isCompacting: Bool { runningCompaction != nil }
+
+  private var runningCompaction: StorageCompaction?
 
   func cleanupOrphanedContents() throws -> Int {
     let descriptor = FetchDescriptor<HistoryItemContent>(
@@ -178,6 +198,7 @@ class Storage {
       where: #Predicate { $0.item == nil }
     )
     context.processPendingChanges()
+    stopCompaction()
     try context.save()
 
     return count
@@ -192,6 +213,8 @@ class Storage {
   #if DEBUG
   // Tests set this to make every `save()` throw it.
   var saveFailureForTesting: (any Error)?
+  // Tests set this to make `allItems()` throw it.
+  var fetchFailureForTesting: (any Error)?
 
   // Makes `storage` the shared store and returns the one it replaces. Tests
   // only: the history must be reloaded afterwards.
@@ -211,6 +234,7 @@ class Storage {
       throw saveFailureForTesting
     }
     #endif
+    stopCompaction()
     try context.save()
   }
 
@@ -476,6 +500,7 @@ class Storage {
     }
 
     context.processPendingChanges()
+    stopCompaction()
     try context.save()
 
     return count
@@ -557,4 +582,142 @@ nonisolated struct StorageCompactionError: CustomNSError {
   let code: Int32
 
   var errorCode: Int { Int(code) }
+
+  // Stopped by a save or a deadline; SQLite rolled it back.
+  static let interrupted = StorageCompactionError(code: SQLITE_INTERRUPT)
+  // Free pages were left after an incremental vacuum.
+  static let freePagesRemain = StorageCompactionError(code: -1)
+  var isInterrupted: Bool { code == SQLITE_INTERRUPT }
+}
+
+// One compaction on its own SQLite connection: checkpoint (TRUNCATE),
+// incremental vacuum (or VACUUM), checkpoint. `run()` may run on any thread; `cancel()` and
+// `waitUntilFinished()` may be called from another one. A progress handler
+// and a busy handler stop it promptly once cancelled or past its deadline,
+// and SQLite rolls back an interrupted VACUUM. A busy database is waited for
+// up to `busyTimeout`, then reported as SQLITE_BUSY.
+nonisolated final class StorageCompaction: @unchecked Sendable {
+  static let busyTimeout: TimeInterval = 2
+
+  private let url: URL
+  private let deadline: TimeInterval?
+  private let lock = NSLock()
+  private var cancelled = false
+  private let finished = DispatchSemaphore(value: 0)
+
+  init(url: URL, deadline: TimeInterval?) {
+    self.url = url
+    self.deadline = deadline
+  }
+
+  func cancel() {
+    lock.withLock { cancelled = true }
+  }
+
+  var shouldStop: Bool {
+    lock.withLock { cancelled } || deadline.map { ProcessInfo.processInfo.systemUptime >= $0 } ?? false
+  }
+
+  func waitUntilFinished() {
+    finished.wait()
+    finished.signal()
+  }
+
+  func runInBackground() async throws {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+      DispatchQueue.global(qos: .utility).async {
+        do {
+          try self.run()
+          continuation.resume()
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+  }
+
+  func run() throws {
+    defer { finished.signal() }
+    guard !shouldStop else {
+      throw StorageCompactionError.interrupted
+    }
+
+    var database: OpaquePointer?
+    let opened = sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE, nil)
+    defer { sqlite3_close_v2(database) }
+    guard opened == SQLITE_OK, let database else {
+      throw StorageCompactionError(code: opened)
+    }
+
+    let context = Unmanaged.passUnretained(self).toOpaque()
+    sqlite3_busy_handler(database, { context, attempts in
+      let job = Unmanaged<StorageCompaction>.fromOpaque(context!).takeUnretainedValue()
+      guard !job.shouldStop, Double(attempts) * 0.01 < StorageCompaction.busyTimeout else {
+        return 0
+      }
+      usleep(10_000)
+      return 1
+    }, context)
+    sqlite3_progress_handler(database, 10, { context in
+      Unmanaged<StorageCompaction>.fromOpaque(context!).takeUnretainedValue().shouldStop ? 1 : 0
+    }, context)
+
+    do {
+      try checkpoint(database)
+      // Core Data creates its stores with incremental auto-vacuum. Then
+      // every free page (where deleted rows were) is filled with a page moved
+      // from the end of the file, and the file is truncated: the cost follows
+      // what was deleted, not the size of the store. Otherwise a full VACUUM
+      // rebuilds the file.
+      if try integer("PRAGMA auto_vacuum", in: database) == 2 {
+        try execute("PRAGMA incremental_vacuum", in: database)
+        guard try integer("PRAGMA freelist_count", in: database) == 0 else {
+          throw StorageCompactionError.freePagesRemain
+        }
+      } else {
+        try execute("VACUUM", in: database)
+      }
+      try checkpoint(database)
+    } catch where shouldStop {
+      throw StorageCompactionError.interrupted
+    }
+  }
+
+  private func integer(_ sql: String, in database: OpaquePointer) throws -> Int32 {
+    var statement: OpaquePointer?
+    let prepared = sqlite3_prepare_v2(database, sql, -1, &statement, nil)
+    defer { sqlite3_finalize(statement) }
+    guard prepared == SQLITE_OK else {
+      throw StorageCompactionError(code: prepared)
+    }
+    let stepped = sqlite3_step(statement)
+    guard stepped == SQLITE_ROW else {
+      throw StorageCompactionError(code: stepped)
+    }
+    return sqlite3_column_int(statement, 0)
+  }
+
+  private func checkpoint(_ database: OpaquePointer) throws {
+    var statement: OpaquePointer?
+    let prepared = sqlite3_prepare_v2(database, "PRAGMA wal_checkpoint(TRUNCATE)", -1, &statement, nil)
+    defer { sqlite3_finalize(statement) }
+    guard prepared == SQLITE_OK else {
+      throw StorageCompactionError(code: prepared)
+    }
+    let stepped = sqlite3_step(statement)
+    guard stepped == SQLITE_ROW else {
+      throw StorageCompactionError(code: stepped)
+    }
+    // The first column is 1 if the checkpoint could not complete.
+    guard sqlite3_column_int(statement, 0) == 0 else {
+      throw StorageCompactionError(code: SQLITE_BUSY)
+    }
+  }
+
+  private func execute(_ sql: String, in database: OpaquePointer) throws {
+    let result = sqlite3_exec(database, sql, nil, nil, nil)
+    guard result == SQLITE_OK else {
+      throw StorageCompactionError(code: result)
+    }
+  }
 }

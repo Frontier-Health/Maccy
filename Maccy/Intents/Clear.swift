@@ -15,6 +15,7 @@ struct Clear: AppIntent, CustomIntentMigratedAppIntent {
 
   func perform() async throws -> some IntentResult {
     try await MainActor.run { try HistoryIntentAccess.requireEnabled() }
+    try await HistoryIntentAccess.waitUntilReady()
 
     if !Defaults[.suppressClearAlert] {
       try await requestConfirmation()

@@ -207,8 +207,8 @@ struct StorageSettingsPane: View {
           .fixedSize(horizontal: false, vertical: true)
           .controlSize(.small)
           .foregroundStyle(expiry.isInvalid ? Color.red : Color.gray)
-        if let failedAt = History.shared.automaticRemovalFailedAt {
-          Text(Self.automaticRemovalFailed(at: failedAt))
+        if let warning = Self.maintenanceFailing(History.shared.failingOperations) {
+          Text(warning)
             .fixedSize(horizontal: false, vertical: true)
             .controlSize(.small)
             .foregroundStyle(.red)
@@ -314,13 +314,13 @@ struct StorageSettingsPane: View {
       return String(format: localized(
         "ExpiryOn",
         "Items you have not copied for %lld hours are removed (copying an item from Maccy counts). Pinned " +
-          "items are kept. Checked at launch and every few minutes."
+          "items are kept. Checked at launch, every few minutes and before history is shown."
       ), Int64(hours))
     case (.hours(let hours), true):
       return String(format: localized(
         "ExpiryOnManaged",
         "Set by your administrator: items not copied for %lld hours are removed, including pinned items. " +
-          "Checked at launch and every few minutes."
+          "Checked at launch, every few minutes and before history is shown."
       ), Int64(hours))
     case (.invalid, false):
       return String(format: localized(
@@ -331,25 +331,32 @@ struct StorageSettingsPane: View {
     case (.invalid, true):
       return String(format: localized(
         "ExpiryInvalidManaged",
-        "The expiry value in your configuration profile is invalid. Until your administrator fixes it, Maccy " +
-          "removes items not copied for %lld hour, including pinned items."
+        "The expiry value in your configuration profile is invalid (it must be 0 or a positive number of " +
+          "hours). Until your administrator fixes it, Maccy removes items not copied for %lld hour, including " +
+          "pinned items."
       ), Int64(HistoryExpiry.invalidValueHours))
     }
   }
 
-  private static func automaticRemovalFailed(at date: Date) -> String {
-    String(format: localized(
-      "AutomaticRemovalFailed",
-      "Automatic removal last failed at %@. Items that should have been removed are still stored. Maccy " +
-        "keeps trying."
-    ), date.formatted(date: .abbreviated, time: .shortened))
+  // Lists every automatic operation that is failing now, or nil if none is.
+  static func maintenanceFailing(_ operations: [MaintenanceOperation: Date]) -> String? {
+    guard let lastFailure = operations.values.max() else {
+      return nil
+    }
+    let names = operations.keys.sorted().map(\.label)
+    return String(format: localized(
+      "MaintenanceFailing",
+      "Maccy is failing at: %1$@. Items or files that should have been removed may still be on this Mac. " +
+        "Last failure at %2$@. Maccy keeps trying."
+    ), ListFormatter.localizedString(byJoining: names), lastFailure.formatted(date: .abbreviated, time: .shortened))
   }
 
   private static var compactionNote: String {
     localized(
       "CompactionNote",
-      "After clearing history or removing expired items, Maccy asks its database to compact. This is not " +
-        "secure erasure: copies can remain on the disk, in APFS snapshots, in Time Machine and in other backups."
+      "After clearing history or removing expired items, Maccy asks its database to compact, in the " +
+        "background. This is not secure erasure: copies can remain on the disk, in APFS snapshots, in Time " +
+        "Machine and in other backups."
     )
   }
 

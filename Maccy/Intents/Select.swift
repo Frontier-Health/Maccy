@@ -19,9 +19,12 @@ struct Select: AppIntent, CustomIntentMigratedAppIntent {
   var number: Int
 
   func perform() async throws -> some IntentResult & ReturnsValue<String> {
+    try await MainActor.run { try HistoryIntentAccess.requireEnabled() }
+    try await HistoryIntentAccess.waitUntilReady()
     let value = try await MainActor.run { () -> String in
       try HistoryIntentAccess.requireEnabled()
       AppState.shared.history.enforceStoragePolicy()
+      AppState.shared.history.runExpiryIfDue()
       let item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items)
 
       let value = Self.value(of: item)

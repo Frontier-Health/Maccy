@@ -6,7 +6,9 @@
 "IgnoredPasteboardTypesDescription" = "It's possible to ignore certain pasteboard item types from remembering.\nBy default, some known application-specific types are defined. You can remove them and add any custom types you want.";
 "IgnoredPasteboardTypesReset" = "Reset";
 "RegexpTab" = "Regular expressions";
-"IgnoredRegexpsDescription" = "Ignore rules reject the entire copy, including text extracted from HTML and RTF. With rules enabled, copies exceeding 16,384 UTF-16 text units or 65,536 bytes of text data are rejected, as are unreadable rich text and rules that exceed the matching time budget. HTML must be a UTF-8 XHTML fragment; unsupported HTML is rejected. Press Return to save a rule.";
+"IgnoredRegexpsDescription" = "Ignore rules reject the entire copy, checking plain text, RTF, HTML source and extracted HTML text. With rules enabled, copies exceeding 128,000 UTF-16 units (summed across all checked text) or 8 MiB of text data are rejected. Unreadable or undelivered text data and matching that exceeds a cooperative 100 ms budget also reject the copy. Press Return to save a rule.";
 
-"InvalidIgnoreRule" = "A stored ignore rule is invalid. Clipboard capture is blocked until you fix or remove it.";
+"InvalidIgnoreRule" = "A stored ignore rule is invalid. Maccy is not saving anything you copy until this rule is fixed or removed.";
+"InvalidManagedIgnoreRule" = "A managed ignore rule is invalid. Maccy is not saving anything you copy. Ask your administrator to fix or remove the rule in your configuration profile.";
+"ManagedIgnoreRules" = "These rules are controlled by a configuration profile. Only your administrator can change or remove them.";
 "InvalidIgnoreRuleDraft" = "Rule not saved. Enter a valid, nonempty regular expression (up to 4,096 UTF-16 units; at most 128 rules). Press Return to save.";

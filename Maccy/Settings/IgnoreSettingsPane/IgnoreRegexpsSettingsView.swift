@@ -9,6 +9,8 @@ struct IgnoreRegexpsSettingsView: View {
   @State private var selection: Int?
   @State private var saveFailed = false
 
+  private var managed: Bool { IgnoreRules.isManaged() }
+
   var body: some View {
     VStack(alignment: .leading) {
       List(selection: $selection) {
@@ -18,6 +20,7 @@ struct IgnoreRegexpsSettingsView: View {
               get: { drafts[index] ?? regexp },
               set: { drafts[index] = $0 }
             ))
+            .disabled(managed)
             .onSubmit {
               saveFailed = !IgnoreRules.save(drafts[index] ?? regexp, replacingAt: index)
             }
@@ -45,14 +48,25 @@ struct IgnoreRegexpsSettingsView: View {
           removeSelection()
         }
       }.frame(width: 50)
+        .disabled(managed)
 
       if saveFailed {
         Text("InvalidIgnoreRuleDraft", tableName: "IgnoreSettings")
           .foregroundStyle(.red)
       }
       if IgnoreRules().hasInvalidStoredRules {
-        Text("InvalidIgnoreRule", tableName: "IgnoreSettings")
-          .foregroundStyle(.red)
+        Label {
+          Text(managed ? "InvalidManagedIgnoreRule" : "InvalidIgnoreRule", tableName: "IgnoreSettings")
+        } icon: {
+          Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .fontWeight(.semibold)
+        .foregroundStyle(.red)
+        .fixedSize(horizontal: false, vertical: true)
+      }
+      if managed {
+        Text("ManagedIgnoreRules", tableName: "IgnoreSettings")
+          .fixedSize(horizontal: false, vertical: true)
       }
       Text("IgnoredRegexpsDescription", tableName: "IgnoreSettings")
         .fixedSize(horizontal: false, vertical: true)
@@ -63,7 +77,7 @@ struct IgnoreRegexpsSettingsView: View {
 
   private func removeSelection() {
     guard let selection, ignoredRegexps.indices.contains(selection) else { return }
-    ignoredRegexps.remove(at: selection)
+    guard IgnoreRules.remove(at: selection) else { return }
     self.selection = nil
     saveFailed = false
   }

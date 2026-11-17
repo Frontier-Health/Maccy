@@ -565,13 +565,13 @@ extension SharedStateTests {
       #expect(checkNow().isEmpty)
     }
 
-    @Test("Unreadable rich text and HTML with document declarations fail closed")
+    @Test("Malformed HTML remains usable; unreadable RTF still fails closed")
     func ignoreUnreadableRichText() {
       Defaults[.ignoreRegexp] = ["secret"]
       for html in ["<p>unclosed", "<!DOCTYPE html><p>safe</p>", "<p>&unknown;</p>",
                    "<!DOCTYPE x [<!ENTITY x 'secret'>]><p>&x;</p>"] {
         copyRichText(html, type: .html)
-        #expect(checkNow().isEmpty)
+        #expect(checkNow().count == (html.contains("secret") ? 0 : 1))
       }
       copyRichText("not RTF", type: .rtf)
       #expect(checkNow().isEmpty)
@@ -636,6 +636,63 @@ extension SharedStateTests {
       #expect(storedCaptureMode == .capturing)
       copyString("next copy")
       #expect(checkNow().count == 1)
+    }
+
+    @Test("Chrome HTML beside empty plain text is captured without rules, including large copies")
+    func chromeHTMLWithoutRules() {
+      for count in [1, IgnoreRules.dataLimit + 1] {
+        copyString("")
+        pasteboard.addTypes([.html], owner: nil)
+        pasteboard.setString("<meta charset='utf-8'><!--StartFragment--><b>" +
+                             String(repeating: "a", count: count) + "</b><!--EndFragment-->", forType: .html)
+        #expect(checkNow().count == 1)
+      }
+    }
+
+    @Test("Ordinary browser and document fragments are captured with rules; hidden source matches reject")
+    func tolerantHTMLWatcher() {
+      Defaults[.ignoreRegexp] = ["password"]
+      for html in ["<meta charset='utf-8'><!--StartFragment--><p class=copy>ordinary&nbsp;text<br>more",
+                   "<!DOCTYPE html><!--[if mso]><xml>office</xml><![endif]--><p>ordinary text</p>",
+                   "<p>unclosed", "ordinary &bad; text", "<p title='unfinished"] {
+        copyRichText(html, type: .html)
+        #expect(checkNow().count == 1)
+      }
+      for html in ["pass<b>word</b>", "<p title=password>ordinary text</p>",
+                   "<!--password--><p>ordinary</p>", "<script>password</script><p>ordinary</p>",
+                   "<style>password</style><p>ordinary</p>", "pass&#119;ord"] {
+        copyRichText(html, type: .html)
+        #expect(checkNow().isEmpty)
+      }
+      pasteboard.declareTypes([.html], owner: nil)
+      pasteboard.setData("<p>pass<b>word</b>".data(using: .utf16), forType: .html)
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Undelivered advertised HTML rejects the event and preserves skip next")
+    func undeliveredHTML() {
+      Defaults[.ignoreRegexp] = ["secret"]
+      setCaptureMode(.skipNext)
+      copyString("ordinary", types: [.string, .html])
+      #expect(checkNow().isEmpty)
+      #expect(storedCaptureMode == .skipNext)
+      let rules = IgnoreRules()
+      #expect(rules.rejects(pasteboard.pasteboardItems ?? []))
+      #expect(rules.lastRejection == .undecodable)
+    }
+
+    @Test("An invalid stored entry remains removable and repairable at the settings boundary")
+    func removeInvalidRule() {
+      Defaults[.ignoreRegexp] = ["[", "secret"]
+      #expect(IgnoreRules.remove(at: 0))
+      #expect(Defaults[.ignoreRegexp] == ["secret"])
+      copyString("ordinary")
+      #expect(checkNow().count == 1)
+      #expect(!IgnoreRules.remove(at: 5))
+      Defaults[.ignoreRegexp] = ["["]
+      #expect(IgnoreRules.save("token", replacingAt: 0))
+      copyString("token")
+      #expect(checkNow().isEmpty)
     }
 
     private func copyRichText(_ text: String, type: NSPasteboard.PasteboardType) {
@@ -1198,4 +1255,86 @@ struct CaptureModeTests {
 
 extension CaptureModeRequest {
   static let allRequests: [CaptureModeRequest] = [.togglePause, .toggleSkipNext, .pause, .resume]
+}
+
+
+@MainActor
+struct ClipboardHTMLTextTests {
+  @Test("Tolerant HTML extraction", arguments: [
+    ("<meta charset='utf-8'><!--StartFragment--><p class=copy>pass<b>word</b><br>next&nbsp;line</p><!--EndFragment-->", " password next\u{00A0}line "),
+    ("<!DOCTYPE html><!--[if mso]><xml>office</xml><![endif]--><p>Word<span> text</span></p>", " Word text "),
+    ("&amp;&lt;&gt;&quot;&apos;&nbsp;&#65;&#x1F600;", "&<>\"'\u{00A0}A😀"),
+    ("pass<b>word</b><span>123</span>", "password123"),
+    ("a<script src=x>hidden <b>script</b></script><style>hidden</style>b", "ab"),
+    ("a<!--unfinished", "a"),
+    ("a<b title='unterminated", "a"),
+    ("a<b <span>c</span>", "ac"),
+    ("a &bogus; &#xZZ; &#0; &#xD800; &unfinished", "a &bogus; &#xZZ; &#0; &#xD800; &unfinished"),
+    ("a < 3 and > 1", "a < 3 and > 1"),
+    ("<div>a</div><div>b</div>", " a b "),
+    ("<span title='a>b'>text</span>", "text")
+  ])
+  func fragments(input: String, expected: String) {
+    #expect(ClipboardHTMLText.extract(Data(input.utf8)) == expected)
+  }
+
+  @Test("UTF-16 HTML, with and without BOM", arguments: [
+    String.Encoding.utf16, .utf16LittleEndian, .utf16BigEndian
+  ])
+  func utf16(encoding: String.Encoding) throws {
+    let data = try #require("<meta charset=utf-16>pass<b>word</b>".data(using: encoding))
+    #expect(ClipboardHTMLText.extract(data) == "password")
+  }
+
+  @Test("Undecodable HTML fails explicitly")
+  func undecodable() {
+    #expect(ClipboardHTMLText.extract(Data([0xFF])) == nil)
+    #expect(ClipboardHTMLText.extract(Data([0xEF, 0xBB, 0xBF]) + Data("pass<b>word</b>".utf8)) == "password")
+    #expect(ClipboardHTMLText.extract(Data("text".utf8) + Data([0xFF])) == "text\u{FFFD}")
+  }
+
+  @Test("Managed lists refuse replacement, addition and deletion without shadow writes")
+  func managedRules() throws {
+    let key = Defaults.Keys.ignoreRegexp.name
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = try #require(ManagedDefaults(suiteName: suite, forced: [key: ["["]]))
+    #expect(IgnoreRules.isManaged(in: defaults))
+    #expect(!IgnoreRules.save("valid", replacingAt: 0, in: defaults))
+    #expect(!IgnoreRules.save("valid", in: defaults))
+    #expect(!IgnoreRules.remove(at: 0, in: defaults))
+    #expect(defaults.object(forKey: key) as? [String] == ["["])
+    #expect(defaults.persistentDomain(forName: suite)?[key] == nil)
+    let rules = IgnoreRules(preferences: defaults)
+    #expect(rules.hasInvalidStoredRules)
+    #expect(rules.rejects([]))
+    #expect(rules.lastRejection == .invalidStoredRule)
+  }
+
+  @Test("Data preflight precedes decoding; rejection categories contain no copied text")
+  func rejectionReasons() throws {
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(["secret"], forKey: Defaults.Keys.ignoreRegexp.name)
+    let rules = IgnoreRules(preferences: defaults)
+    let broken = NSPasteboardItem()
+    broken.setData(Data([0xFF]), forType: .html)
+    let huge = NSPasteboardItem()
+    huge.setData(Data(repeating: 97, count: IgnoreRules.dataLimit + 1), forType: .html)
+    #expect(rules.rejects([broken, huge]))
+    #expect(rules.lastRejection == .dataLimit)
+    #expect(rules.rejects([broken]))
+    #expect(rules.lastRejection == .undecodable)
+    let item = NSPasteboardItem()
+    item.setString("secret", forType: .string)
+    #expect(rules.rejects([item]))
+    #expect(rules.lastRejection == .matchedRule)
+    item.setString(String(repeating: "a", count: IgnoreRules.textLimit + 1), forType: .string)
+    #expect(rules.rejects([item]))
+    #expect(rules.lastRejection == .textLimit)
+    defaults.set(["^(a+)+$"], forKey: Defaults.Keys.ignoreRegexp.name)
+    item.setString(String(repeating: "a", count: 200) + "!", forType: .string)
+    #expect(rules.rejects([item]))
+    #expect(rules.lastRejection == .timeBudget)
+  }
 }

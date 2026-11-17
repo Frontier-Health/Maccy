@@ -318,13 +318,13 @@ class Clipboard {
   }
 
   private func richText(_ item: NSPasteboardItem) -> Bool {
-    if let rtf = item.data(forType: .rtf), rtf.count <= IgnoreRules.dataLimit {
+    if let rtf = item.data(forType: .rtf) {
       if let attributedString = NSAttributedString(rtf: rtf, documentAttributes: nil) {
         return !attributedString.string.isEmpty
       }
     }
 
-    if let html = item.data(forType: .html), html.count <= IgnoreRules.dataLimit {
+    if let html = item.data(forType: .html) {
       return ClipboardHTMLText.extract(html)?.isEmpty == false
     }
 

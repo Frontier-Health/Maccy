@@ -157,6 +157,7 @@ class Popup {
   }
 
   func close() {
+    deferredSelection.cancel()
     AppState.shared.appDelegate?.panel.close()  // close() calls reset
   }
 

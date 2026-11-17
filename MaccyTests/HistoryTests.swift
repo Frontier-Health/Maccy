@@ -93,8 +93,7 @@ extension SharedStateTests {
       popup.deferredSelection.schedule(flags: [.command]) { log.flags.append($0) }
       let pending = popup.deferredSelection.pendingTaskForTesting
 
-      // The panel calls this when it closes.
-      popup.reset()
+      popup.close()
       #expect(!popup.deferredSelection.isPending)
 
       await pending?.value

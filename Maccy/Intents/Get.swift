@@ -55,12 +55,15 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
         throw AppIntentError.notFound
       }
 
+      // Only types that may be stored now are handed out, whatever an item
+      // stored under an earlier policy still holds.
+      let policy = StoragePolicy.current
       return ItemContents(
-        text: item.text,
-        html: item.htmlData,
-        file: item.fileURLs.first,
-        image: item.imageData,
-        rtf: item.rtfData
+        text: policy.enabledTypes.contains(.string) ? item.text : nil,
+        html: policy.enabledTypes.contains(.html) ? item.htmlData : nil,
+        file: policy.enabledTypes.contains(.fileURL) ? item.fileURLs.first : nil,
+        image: policy.isEnabled(.images) ? item.imageData : nil,
+        rtf: policy.enabledTypes.contains(.rtf) ? item.rtfData : nil
       )
     }
 

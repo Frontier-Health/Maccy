@@ -1,15 +1,6 @@
 import AppKit
 import Defaults
 
-nonisolated struct StorageType: Sendable {
-  static let files = StorageType(types: [.fileURL])
-  static let images = StorageType(types: [.png, .tiff, .jpeg, .heic])
-  static let text = StorageType(types: [.html, .rtf, .string])
-  static let all = StorageType(types: files.types + images.types + text.types)
-
-  var types: [NSPasteboard.PasteboardType]
-}
-
 nonisolated extension Defaults.Keys {
 #if DEBUG
   // UI Tests bundle preferences
@@ -33,8 +24,11 @@ nonisolated extension Defaults.Keys {
   static let clearOnQuit = Key<Bool>("clearOnQuit", default: false, suite: preferencesSuite)
   static let clearSystemClipboard = Key<Bool>("clearSystemClipboard", default: false, suite: preferencesSuite)
   static let clipboardCheckInterval = Key<Double>("clipboardCheckInterval", default: 0.5, suite: preferencesSuite)
+  // Write-only for the Storage settings. Read it only through
+  // StoragePolicy.effective(in:), which treats a malformed value as "store
+  // nothing"; reading this key directly falls back to the default instead.
   static let enabledPasteboardTypes = Key<Set<NSPasteboard.PasteboardType>>(
-    "enabledPasteboardTypes", default: Set(StorageType.all.types), suite: preferencesSuite
+    StoragePolicy.preferenceKey, default: StoragePolicy.defaultEnabledTypes, suite: preferencesSuite
   )
   static let highlightMatch = Key<HighlightMatch>("highlightMatch", default: .bold, suite: preferencesSuite)
   static let ignoreAllAppsExceptListed = Key<Bool>("ignoreAllAppsExceptListed", default: false, suite: preferencesSuite)

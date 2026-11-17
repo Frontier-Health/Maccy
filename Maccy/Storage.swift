@@ -53,21 +53,53 @@ class Storage {
     return count
   }
 
-  func removeUnpersistableContents() throws -> Int {
-    let contents = try context.fetch(FetchDescriptor<HistoryItemContent>())
-    let unwanted = contents.filter {
-      !Clipboard.shared.isPersistable(NSPasteboard.PasteboardType($0.type))
+  // Brings every stored item in line with `policy`: representations it doesn't
+  // allow are deleted, metadata is normalised, items left without any enabled
+  // content are deleted, and the titles of changed items are regenerated so they
+  // no longer show removed content. Orphaned contents are deleted too. Returns
+  // the number of items changed or deleted plus orphans removed.
+  @discardableResult
+  func enforce(_ policy: StoragePolicy) throws -> Int {
+    var changes = 0
+    for item in try context.fetch(FetchDescriptor<HistoryItem>()) where enforce(policy, on: item) {
+      changes += 1
+      if policy.hasStorableContent(item.contents.map { NSPasteboard.PasteboardType($0.type) }) {
+        item.title = item.generateTitle()
+      } else {
+        item.contents.forEach(context.delete)
+        context.delete(item)
+      }
     }
 
-    guard !unwanted.isEmpty else {
-      return 0
-    }
-
-    unwanted.forEach(context.delete)
     context.processPendingChanges()
-    try context.save()
+    changes += try cleanupOrphanedContents()
+    if changes > 0 {
+      try context.save()
+    }
 
-    return unwanted.count
+    return changes
+  }
+
+  // Deletes or normalises the contents of one item that `policy` doesn't allow
+  // as stored. Returns whether anything changed. The item itself is kept.
+  @discardableResult
+  func enforce(_ policy: StoragePolicy, on item: HistoryItem) -> Bool {
+    var changed = false
+    for content in item.contents {
+      switch policy.admission(of: NSPasteboard.PasteboardType(content.type), value: content.value) {
+      case .drop:
+        item.contents.removeAll { $0 === content }
+        context.delete(content)
+        changed = true
+      case .store(let value) where value != content.value:
+        content.value = value
+        changed = true
+      case .store:
+        break
+      }
+    }
+
+    return changed
   }
 
   // Titles stored before the sanitization in `HistoryItem.generateTitle()` may

@@ -80,6 +80,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @ObservationIgnored
   private var sessionLog: [Int: HistoryItem] = [:]
 
+  // The storage policy the store was last brought in line with.
+  @ObservationIgnored
+  private var enforcedStoragePolicy: StoragePolicy?
+
 #if DEBUG
   static let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 #endif
@@ -92,6 +96,13 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     Task {
       for await _ in Defaults.updates(.pasteByDefault, initial: false) {
         updateShortcuts()
+      }
+    }
+
+    // Turning a storage type off removes it from existing history too.
+    Task {
+      for await _ in Defaults.updates(.enabledPasteboardTypes, initial: false) {
+        try? await load()
       }
     }
 
@@ -124,6 +135,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
+    enforceStoragePolicy()
     let descriptor = FetchDescriptor<HistoryItem>()
     let results = try Storage.shared.context.fetch(descriptor)
     let decorators = sorter.sort(results).map { HistoryItemDecorator($0) }
@@ -138,6 +150,24 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     // Ensure that panel size is proper *after* loading all items.
     Task {
       AppState.shared.popup.needsResize = true
+    }
+  }
+
+  // Removes stored representations the current storage policy doesn't allow.
+  // Runs on the first load after launch and whenever the policy changes, so
+  // nothing stored under an earlier policy is shown or pasted.
+  @MainActor
+  func enforceStoragePolicy() {
+    let policy = StoragePolicy.current
+    guard policy != enforcedStoragePolicy else {
+      return
+    }
+
+    do {
+      try Storage.shared.enforce(policy)
+      enforcedStoragePolicy = policy
+    } catch {
+      logger.error("Failed to apply storage settings to history: \(error.localizedDescription)")
     }
   }
 
@@ -165,11 +195,17 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       // On macOS 14 the history item needs to be inserted into storage directly after creating it.
       // It was already inserted after creation in Clipboard.swift
     }
+    // Every item reaching history passes the storage allow-list, whichever path
+    // created it.
+    let storagePolicy = StoragePolicy.current
+    Storage.shared.enforce(storagePolicy, on: item)
 
     var replacedPinnedItem: HistoryItemDecorator?
     if let existingHistoryItem = findSimilarItem(item) {
       if isModified(item) == nil {
         transferContents(from: existingHistoryItem, to: item)
+        // The older contents may predate the current policy.
+        Storage.shared.enforce(storagePolicy, on: item)
       }
       item.firstCopiedAt = existingHistoryItem.firstCopiedAt
       item.numberOfCopies += existingHistoryItem.numberOfCopies

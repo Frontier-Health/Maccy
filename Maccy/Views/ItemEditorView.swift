@@ -202,19 +202,7 @@ struct ItemEditorView: View {
     guard editableContent.hasChanges,
           let data = editableContent.text.data(using: .utf8) else { return }
 
-    let historyItem = item.item
-    let stringType = NSPasteboard.PasteboardType.string.rawValue
-    historyItem.contents.removeAll { $0.type != stringType }
-
-    if let index = historyItem.contents.firstIndex(where: {
-      $0.type == stringType
-    }) {
-      historyItem.contents[index].value = data
-    } else {
-      historyItem.contents.append(
-        HistoryItemContent(type: stringType, value: data)
-      )
-    }
+    item.item.replaceText(with: data, storing: StoragePolicy.current)
   }
 
   private func saveChanges() {

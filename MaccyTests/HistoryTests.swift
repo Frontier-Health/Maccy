@@ -425,7 +425,7 @@ extension SharedStateTests {
       try assertStorageCounts(items: 1, contents: 1)
     }
 
-    @Test("Removing unpersistable contents")
+    @Test("Removing contents outside the storage allow-list")
     func removingUnpersistableContents() throws {
       let live = history.add(historyItem("live"))
       live.item.contents.append(HistoryItemContent(
@@ -434,8 +434,9 @@ extension SharedStateTests {
       ))
       try Storage.shared.context.save()
 
-      #expect(try Storage.shared.removeUnpersistableContents() == 1)
-      #expect(try Storage.shared.removeUnpersistableContents() == 0)
+      let policy = StoragePolicy(enabledTypes: StoragePolicy.defaultEnabledTypes)
+      #expect(try Storage.shared.enforce(policy) == 1)
+      #expect(try Storage.shared.enforce(policy) == 0)
       #expect(live.item.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
       try assertStorageCounts(items: 1, contents: 1)
     }

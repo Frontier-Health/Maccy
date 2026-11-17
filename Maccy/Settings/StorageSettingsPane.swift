@@ -5,54 +5,31 @@ import Settings
 struct StorageSettingsPane: View {
   @Observable
   class ViewModel {
-    var saveFiles = false {
-      didSet {
-        Defaults.withoutPropagation {
-          if saveFiles {
-            Defaults[.enabledPasteboardTypes].formUnion(StorageType.files.types)
-          } else {
-            Defaults[.enabledPasteboardTypes].subtract(StorageType.files.types)
-          }
-        }
-      }
-    }
-
-    var saveImages = false {
-      didSet {
-        Defaults.withoutPropagation {
-          if saveImages {
-            Defaults[.enabledPasteboardTypes].formUnion(StorageType.images.types)
-          } else {
-            Defaults[.enabledPasteboardTypes].subtract(StorageType.images.types)
-          }
-        }
-      }
-    }
-
-    var saveText = false {
-      didSet {
-        Defaults.withoutPropagation {
-          if saveText {
-            Defaults[.enabledPasteboardTypes].formUnion(StorageType.text.types)
-          } else {
-            Defaults[.enabledPasteboardTypes].subtract(StorageType.text.types)
-          }
-        }
-      }
-    }
+    // The effective setting, including a value forced by a configuration
+    // profile or a malformed stored value.
+    private(set) var policy = StoragePolicy.current
 
     private var observer: Defaults.Observation?
 
     init() {
-      observer = Defaults.observe(.enabledPasteboardTypes) { change in
-        self.saveFiles = change.newValue.isSuperset(of: StorageType.files.types)
-        self.saveImages = change.newValue.isSuperset(of: StorageType.images.types)
-        self.saveText = change.newValue.isSuperset(of: StorageType.text.types)
+      observer = Defaults.observe(.enabledPasteboardTypes) { _ in
+        self.policy = StoragePolicy.current
       }
     }
 
     isolated deinit {
       observer?.invalidate()
+    }
+
+    func binding(for toggle: StorageType) -> Binding<Bool> {
+      Binding(
+        get: { self.policy.isEnabled(toggle) },
+        set: { isOn in
+          guard !self.policy.isForced else { return }
+          Defaults[.enabledPasteboardTypes] = self.policy.enabledTypes(setting: toggle, to: isOn)
+          self.policy = StoragePolicy.current
+        }
+      )
     }
   }
 
@@ -75,21 +52,28 @@ struct StorageSettingsPane: View {
         bottomDivider: true,
         label: { Text("Save", tableName: "StorageSettings") }
       ) {
-        Toggle(
-          isOn: $viewModel.saveFiles,
-          label: { Text("Files", tableName: "StorageSettings") }
-        )
-        Toggle(
-          isOn: $viewModel.saveImages,
-          label: { Text("Images", tableName: "StorageSettings") }
-        )
-        Toggle(
-          isOn: $viewModel.saveText,
-          label: { Text("Text", tableName: "StorageSettings") }
-        )
+        ForEach(StorageType.toggles) { toggle in
+          Toggle(
+            isOn: viewModel.binding(for: toggle),
+            label: { Text(LocalizedStringKey(toggle.id), tableName: "StorageSettings") }
+          )
+          .disabled(viewModel.policy.isForced)
+        }
         Text("SaveDescription", tableName: "StorageSettings")
           .controlSize(.small)
           .foregroundStyle(.gray)
+        if viewModel.policy.isMalformed {
+          Text(
+            LocalizedStringKey(viewModel.policy.isForced ? "InvalidManagedSaveTypes" : "InvalidSaveTypes"),
+            tableName: "StorageSettings"
+          )
+          .controlSize(.small)
+          .foregroundStyle(.red)
+        } else if viewModel.policy.isForced {
+          Text("ManagedSaveTypes", tableName: "StorageSettings")
+            .controlSize(.small)
+            .foregroundStyle(.gray)
+        }
       }
 
       Settings.Section(label: { Text("Size", tableName: "StorageSettings") }) {

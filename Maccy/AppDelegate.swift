@@ -31,7 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
   private var isStatusItemDisabled: Bool {
     !CaptureMode.effective(in: Clipboard.shared.capturePreferences).capturesCopies ||
-      Defaults[.enabledPasteboardTypes].isEmpty
+      !StoragePolicy.current.storesAnything
   }
 
   private var statusItemVisibilityObserver: NSKeyValueObservation?
@@ -159,11 +159,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     ensureMigration(key: "2025-07-04-add-jpeg-heic") {
-      var types = Defaults[.enabledPasteboardTypes]
-      if !types.isDisjoint(with: StorageType.images.types) {
-        types.formUnion(StorageType.images.types)
+      // A malformed or profile-managed value is left as it is: rewriting it
+      // from the fallback would turn storage back on.
+      let policy = StoragePolicy.current
+      guard !policy.isMalformed, !policy.isForced,
+            !policy.enabledTypes.isDisjoint(with: StorageType.images.types) else {
+        return
       }
-      Defaults[.enabledPasteboardTypes] = types
+      Defaults[.enabledPasteboardTypes] = policy.enabledTypes.union(StorageType.images.types)
     }
 
     ensureMigration(key: "2026-08-12-cleanup-orphaned-history-item-contents") {
@@ -174,9 +177,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       _ = try? Storage.shared.sanitizeTitles()
     }
 
-    ensureMigration(key: "2026-09-15-remove-unpersistable-contents") {
-      _ = try? Storage.shared.removeUnpersistableContents()
-    }
+    // Representations the storage allow-list doesn't cover, including the web
+    // archives this used to remove, are deleted on every launch.
+    History.shared.enforceStoragePolicy()
 
     // The following defaults are not used in Maccy 2.x
     // and should be removed in 3.x.

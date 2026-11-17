@@ -3,7 +3,10 @@
 "Files" = "Files";
 "Images" = "Images";
 "Text" = "Text";
-"SaveDescription" = "Change what types of copied content should be stored.";
+"SaveDescription" = "Change what types of copied content should be stored. Turning a type off also removes it from existing history. Other data apps put on the clipboard is never stored.";
+"InvalidSaveTypes" = "The saved list of content types is invalid. Maccy is not saving anything you copy until you turn a type back on.";
+"InvalidManagedSaveTypes" = "The list of content types in your configuration profile is invalid. Maccy is not saving anything you copy. Ask your administrator to fix it.";
+"ManagedSaveTypes" = "These settings are controlled by a configuration profile. Only your administrator can change them.";
 "Size" = "Size:";
 "SizeTooltip" = "Number of history items to keep.\nDefault: 200.";
 "CurrentSizeTooltip" = "Current size on disk.";

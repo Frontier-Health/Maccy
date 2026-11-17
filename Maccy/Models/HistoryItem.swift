@@ -227,6 +227,31 @@ class HistoryItem {
     return Int(modified)
   }
 
+  // Replaces the item's contents with edited plain text. Every other
+  // representation is deleted, not just detached, so the pre-edit content does
+  // not linger in the store. Does nothing and returns false when the policy
+  // doesn't allow storing plain text.
+  @MainActor
+  @discardableResult
+  func replaceText(with data: Data, storing policy: StoragePolicy) -> Bool {
+    guard policy.enabledTypes.contains(.string) else {
+      return false
+    }
+
+    let stringType = NSPasteboard.PasteboardType.string.rawValue
+    let removed = contents.filter { $0.type != stringType }
+    contents.removeAll { $0.type != stringType }
+    removed.forEach { modelContext?.delete($0) }
+
+    if let index = contents.firstIndex(where: { $0.type == stringType }) {
+      contents[index].value = data
+    } else {
+      contents.append(HistoryItemContent(type: stringType, value: data))
+    }
+
+    return true
+  }
+
   var fromMaccy: Bool { contentData([.fromMaccy]) != nil }
   var universalClipboard: Bool { contentData([.universalClipboard]) != nil }
 

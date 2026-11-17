@@ -120,7 +120,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Nothing reads or shows history, and no alert is shown, until the
     // storage policy and launch maintenance have run; see LaunchSequence.
-    LaunchSequence { step in
+    LaunchSequence { [self] step in
       switch step {
       case .applyStoragePolicy:
         History.shared.beginLaunch()

@@ -10,6 +10,8 @@ nonisolated struct GetItemContents: Sendable, Equatable {
 }
 
 struct Get: AppIntent, CustomIntentMigratedAppIntent {
+  static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
   static let intentClassName = "GetIntent"
 
   static let title: LocalizedStringResource = "Get Item from Clipboard History"
@@ -23,8 +25,6 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
 
   @Parameter(title: "Number", default: 1)
   var number: Int
-
-  private let positionOffset = 1
 
   static var parameterSummary: some ParameterSummary {
     When(\.$selected, .equalTo, false) {
@@ -40,24 +40,24 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
   }
 
   func perform() async throws -> some IntentResult & ReturnsValue<HistoryItemAppEntity> {
-    let contents = try await MainActor.run { () -> GetItemContents in
+    let (contents, imageURL) = try await MainActor.run { () -> (GetItemContents, URL?) in
+      try HistoryIntentAccess.requireEnabled()
       // History reflects the current storage policy before anything is read.
       AppState.shared.history.enforceStoragePolicy()
       var item: HistoryItem?
       if selected {
         item = AppState.shared.navigator.selection.first?.item
       } else {
-        let index = number - positionOffset
-        if AppState.shared.history.items.count >= index {
-          item = AppState.shared.history.items[index].item
-        }
+        item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items).item
       }
 
       guard let item else {
         throw AppIntentError.notFound
       }
 
-      return Self.contents(of: item, readableBy: StoragePolicy.currentReadAllowList)
+      let contents = Self.contents(of: item, readableBy: StoragePolicy.currentReadAllowList)
+      let imageURL = try contents.image.map { try IntentImageExports.write($0, for: item) }
+      return (contents, imageURL)
     }
 
     let intentItem = HistoryItemAppEntity()
@@ -71,10 +71,8 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
       intentItem.file = fileURL
     }
 
-    if let imageData = contents.image {
-      let file = URL.documentsDirectory.appending(path: "image.png")
-      try imageData.write(to: file, options: [.atomic, .completeFileProtection])
-      intentItem.image = file
+    if let imageURL {
+      intentItem.image = IntentFile(fileURL: imageURL, type: .png)
     }
 
     if let rtf = contents.rtf {

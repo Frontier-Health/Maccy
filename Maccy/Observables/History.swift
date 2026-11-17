@@ -140,6 +140,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
+    IntentImageExports.removeLeftoversOnce()
     enforceStoragePolicy(reloadingItems: false)
     try reloadItems()
   }
@@ -311,6 +312,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       item.firstCopiedAt = existingHistoryItem.firstCopiedAt
       item.numberOfCopies += existingHistoryItem.numberOfCopies
       item.pin = existingHistoryItem.pin
+      IntentImageExports.transfer(from: existingHistoryItem, to: item)
       // An alias is kept. With the older contents comes their title, with the
       // source it recorded; it is kept only while that source survives here.
       // A modified copy keeps the title of its own contents.
@@ -382,6 +384,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func clear() {
+    IntentImageExports.removeAll()
     withLogging("Clearing history") {
       allUnpinnedItems.forEach(cleanup)
       allUnpinnedItems.removeAll()
@@ -411,6 +414,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func clearAll() {
+    IntentImageExports.removeAll()
     withLogging("Clearing all history") {
       allPinnedItems.forEach(cleanup)
       allUnpinnedItems.forEach(cleanup)
@@ -489,6 +493,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func cleanup(_ item: HistoryItemDecorator) {
+    IntentImageExports.remove(for: item.item)
     item.cleanupImages()
     Notifier.removeDelivered(for: item.item)
   }

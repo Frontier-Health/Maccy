@@ -1,6 +1,8 @@
 import AppIntents
 
 struct Delete: AppIntent, CustomIntentMigratedAppIntent {
+  static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
   static let intentClassName = "DeleteIntent"
 
   static let title: LocalizedStringResource = "Delete Item from Clipboard History"
@@ -13,17 +15,12 @@ struct Delete: AppIntent, CustomIntentMigratedAppIntent {
     Summary("Delete \(\.$number) Item from Clipboard History")
   }
 
-  private let positionOffset = 1
-
   func perform() async throws -> some IntentResult {
     try await MainActor.run {
-      let items = AppState.shared.history.items
-      let index = number - positionOffset
-      guard items.count >= index else {
-        throw AppIntentError.notFound
-      }
+      try HistoryIntentAccess.requireEnabled()
+      let item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items)
 
-      AppState.shared.history.delete(items[index])
+      AppState.shared.history.delete(item)
     }
 
     return .result()

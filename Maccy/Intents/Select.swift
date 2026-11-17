@@ -1,6 +1,8 @@
 import AppIntents
 
 struct Select: AppIntent, CustomIntentMigratedAppIntent {
+  static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
   static let intentClassName = "SelectIntent"
 
   static let title: LocalizedStringResource = "Select Item in Clipboard History"
@@ -16,20 +18,14 @@ struct Select: AppIntent, CustomIntentMigratedAppIntent {
   @Parameter(title: "Number", default: 1, requestValueDialog: "What is the number of the item?")
   var number: Int
 
-  private let positionOffset = 1
-
   func perform() async throws -> some IntentResult & ReturnsValue<String> {
     let value = try await MainActor.run { () -> String in
-      // Titles reflect the current storage policy before one is returned.
+      try HistoryIntentAccess.requireEnabled()
       AppState.shared.history.enforceStoragePolicy()
-      let items = AppState.shared.history.items
-      let index = number - positionOffset
-      guard items.count >= index else {
-        throw AppIntentError.notFound
-      }
+      let item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items)
 
-      let value = Self.value(of: items[index])
-      AppState.shared.history.select(items[index], flags: .currentModifierFlags)
+      let value = Self.value(of: item)
+      AppState.shared.history.select(item, flags: .currentModifierFlags)
 
       return value
     }

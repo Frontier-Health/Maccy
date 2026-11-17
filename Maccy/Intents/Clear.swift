@@ -2,6 +2,8 @@ import AppIntents
 import Defaults
 
 struct Clear: AppIntent, CustomIntentMigratedAppIntent {
+  static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+
   static let intentClassName = "ClearIntent"
 
   static let title: LocalizedStringResource = "Clear Clipboard History"
@@ -12,11 +14,16 @@ struct Clear: AppIntent, CustomIntentMigratedAppIntent {
   }
 
   func perform() async throws -> some IntentResult {
+    try await MainActor.run { try HistoryIntentAccess.requireEnabled() }
+
     if !Defaults[.suppressClearAlert] {
       try await requestConfirmation()
     }
 
-    await AppState.shared.history.clear()
+    try await MainActor.run {
+      try HistoryIntentAccess.requireEnabled()
+      AppState.shared.history.clear()
+    }
     return .result()
   }
 }

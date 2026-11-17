@@ -452,10 +452,11 @@ class HistoryItem {
 
   // Recognitions queued or running. Cancelled together when text recognition
   // is turned off or images may no longer be read.
-  private static var pendingTextRecognition: [ObjectIdentifier: TextRecognitionJob] = [:]
+  @MainActor private static var pendingTextRecognition: [ObjectIdentifier: TextRecognitionJob] = [:]
 
   // Stops every queued recognition before it decodes anything or reaches
   // Vision, cancels a Vision request already running, and discards results.
+  @MainActor
   static func cancelAllTextRecognition() {
     let jobs = pendingTextRecognition.values
     pendingTextRecognition = [:]

@@ -90,7 +90,7 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
   #if DEBUG
   // Runs after the image is converted, before the checks that follow it, so
   // tests can change settings at that point.
-  static var afterImageConversionForTesting: (() -> Void)?
+  @MainActor static var afterImageConversionForTesting: (() -> Void)?
   #endif
 
   // What the intent hands out for `item`: its contents, and its image

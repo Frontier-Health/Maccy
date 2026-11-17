@@ -1,5 +1,35 @@
 import AppKit
+import Defaults
 import SwiftUI
+
+// Whether edited content may be saved: it is saved as plain text, so only
+// while the storage policy allows storing plain text. Follows the setting
+// while the editor is open, and is read again just before a save.
+@Observable
+final class TextEditPermission {
+  private(set) var isAllowed = TextEditPermission.textIsStorable
+
+  @ObservationIgnored
+  private var observer: Defaults.Observation?
+
+  init() {
+    observer = Defaults.observe(.enabledPasteboardTypes, options: []) { [weak self] _ in
+      self?.refresh()
+    }
+  }
+
+  isolated deinit {
+    observer?.invalidate()
+  }
+
+  func refresh() {
+    isAllowed = Self.textIsStorable
+  }
+
+  private static var textIsStorable: Bool {
+    StoragePolicy.current.allowList?.enabledTypes.contains(.string) == true
+  }
+}
 
 struct ItemEditorView: View {
   @Environment(AppState.self) private var appState
@@ -14,10 +44,10 @@ struct ItemEditorView: View {
   @State private var isTextContent: Bool
   @State private var isRichText: Bool
   @State private var isContentTooLarge: Bool
-  // Edited content is saved as plain text, so it can be edited only while the
-  // storage policy allows storing plain text.
-  @State private var isTextStorable: Bool
+  @State private var textPermission = TextEditPermission()
   @State private var saveError: String?
+
+  private var isTextStorable: Bool { textPermission.isAllowed }
 
   private var hasWarning: Bool {
     isContentTooLarge || (isRichText && editableContent.hasChanges)
@@ -32,7 +62,7 @@ struct ItemEditorView: View {
 
   init(for item: HistoryItemDecorator) {
     self.item = item
-    self._editableTitle = State(initialValue: item.item.title)
+    self._editableTitle = State(initialValue: item.item.displayTitle)
     self._editableContent = State(initialValue: LargeTextView.EditorState(text: item.previewText.string))
     self._selectedPin = State(initialValue: item.item.pin)
 
@@ -45,11 +75,6 @@ struct ItemEditorView: View {
     self._isRichText = State(
       initialValue: item.hasRichText && !item.hasImage && !item.hasFileURLs
     )
-    self._isTextStorable = State(initialValue: Self.textIsStorable)
-  }
-
-  private static var textIsStorable: Bool {
-    StoragePolicy.current.allowList?.enabledTypes.contains(.string) == true
   }
 
   private static var textNotStorableMessage: String {
@@ -154,6 +179,11 @@ struct ItemEditorView: View {
       availablePins = appState.history.availablePins
       focusedField = item.hasImage ? .pin : .title
     }
+    .onChange(of: textPermission.isAllowed) { _, isAllowed in
+      if isAllowed {
+        saveError = nil
+      }
+    }
     .onExitCommand { dismiss() }
   }
 
@@ -214,7 +244,7 @@ struct ItemEditorView: View {
   }
 
   private var hasChangesToApply: Bool {
-    let titleChanged = !item.hasImage && editableTitle != item.item.title
+    let titleChanged = !item.hasImage && editableTitle != item.item.displayTitle
     let pinChanged = selectedPin != nil && selectedPin != item.item.pin
     let contentChanged = (isTextContent || isRichText) && editableContent.hasChanges
     return titleChanged || pinChanged || contentChanged
@@ -223,21 +253,22 @@ struct ItemEditorView: View {
   // Applies every change, or none: a content edit the storage policy refuses
   // leaves the title and pin unchanged too. Returns whether it was applied.
   private func applyChanges() -> Bool {
+    textPermission.refresh()
     if (isTextContent || isRichText) && editableContent.hasChanges {
-      guard let data = editableContent.text.data(using: .utf8),
+      guard textPermission.isAllowed,
+            let data = editableContent.text.data(using: .utf8),
             item.item.replaceText(with: data, storing: StoragePolicy.current) else {
-        isTextStorable = Self.textIsStorable
+        textPermission.refresh()
         saveError = Self.textNotStorableMessage
         return false
       }
     }
 
-    if !item.hasImage && editableTitle != item.item.title {
+    if !item.hasImage && editableTitle != item.item.displayTitle {
       // An empty alias goes back to a title made from the content.
-      item.item.hasCustomTitle = !editableTitle.isEmpty
-      item.item.title = editableTitle.isEmpty ? item.item.generateTitle() : editableTitle
-      item.title = item.item.title
+      item.item.setAlias(editableTitle)
     }
+    item.refreshTitle()
 
     if let selectedPin {
       appState.history.updatePin(item.item, to: selectedPin)

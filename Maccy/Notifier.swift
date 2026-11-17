@@ -12,6 +12,13 @@ class Notifier {
     }
   }
 
+  // A notification about a history item shows only its title that may be
+  // shown under the current storage policy.
+  @MainActor
+  static func body(for item: HistoryItem) -> String {
+    item.displayTitle
+  }
+
   static func notify(body: String?, sound: NSSound?) {
     guard let body else { return }
 

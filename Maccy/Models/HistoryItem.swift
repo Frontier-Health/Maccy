@@ -79,10 +79,13 @@ class HistoryItem {
   var lastCopiedAt: Date = Date.now
   var numberOfCopies: Int = 1
   var pin: String?
-  var title = ""
-  // The user set the title by hand (an alias). It survives the storage
-  // clean-up while the item keeps allowed content; derived titles don't.
-  var hasCustomTitle = false
+  // The stored title. Not read outside this file: everything that shows a
+  // title goes through `displayTitle`, which checks it against the storage
+  // policy first. Set only through `setTitle(_:source:)`.
+  private var title = ""
+  // What `title` was made from (a raw `HistoryItemTitleSource`), recorded
+  // whenever the title is set. Rows stored before it existed read as unknown.
+  private var titleSourceValue = HistoryItemTitleSource.unknown.rawValue
 
   @Relationship(deleteRule: .cascade, inverse: \HistoryItemContent.item)
   var contents: [HistoryItemContent] = []
@@ -96,6 +99,7 @@ class HistoryItem {
     self.firstCopiedAt = firstCopiedAt
     self.lastCopiedAt = lastCopiedAt
     self.contents = contents
+    self.titleSourceValue = HistoryItemTitleSource.nothing.rawValue
   }
 
   func supersedes(_ item: HistoryItem) -> Bool {
@@ -109,51 +113,196 @@ class HistoryItem {
   }
 
   // MARK: Titles
+  //
+  // A title records where it came from: the user (an alias), one stored
+  // representation type, or nothing. Nothing infers the source from the
+  // current contents. `displayTitle` shows the stored title only while that
+  // source may be read; otherwise it shows a title made from what may be read
+  // now, so a title made from data the storage policy excludes is never shown,
+  // whether or not the clean-up has removed that data yet.
 
-  // A derived title, made only from representations `allowList` lets Maccy
-  // read. There is no fallback to the previous title. An image's title is
-  // recognised asynchronously and is "" until then.
+  var titleSource: HistoryItemTitleSource { HistoryItemTitleSource(rawValue: titleSourceValue) }
+
+  // The only place a title is assigned.
+  func setTitle(_ newTitle: String, source: HistoryItemTitleSource) {
+    title = newTitle
+    titleSourceValue = source.rawValue
+  }
+
+  // A title the user typed. An empty one goes back to a derived title.
   @MainActor
-  func generateTitle(
+  func setAlias(_ alias: String) {
+    if alias.isEmpty {
+      regenerateTitle()
+    } else {
+      setTitle(alias, source: .user)
+    }
+  }
+
+  // Takes over another item's title and its recorded source, as a duplicate
+  // merge does. `reconcileTitle` then checks it against this item's contents.
+  func adoptTitle(of other: HistoryItem) {
+    setTitle(other.title, source: other.titleSource)
+  }
+
+  // The title that may be shown under `allowList`: the stored one if its
+  // source is the user or a type `allowList` allows that the item still has;
+  // otherwise one made now from what may be read (never recognising image
+  // text), or a placeholder when nothing on the item may be read.
+  var displayTitle: String { displayTitle(readableBy: StoragePolicy.currentReadAllowList) }
+  func displayTitle(readableBy allowList: StorageAllowList) -> String {
+    if titleSource == .user {
+      return title
+    }
+
+    guard allowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
+      return Self.hiddenTitle
+    }
+
+    if storedTitleIsReadable(by: allowList) {
+      return title
+    }
+
+    return generateTitle(readableBy: allowList)
+  }
+
+  static var hiddenTitle: String {
+    NSLocalizedString("HiddenItemTitle", value: "Content not shown", comment: "")
+  }
+
+  // Makes the title again from what `allowList` lets Maccy read and records
+  // its source. An image's title is recognised asynchronously and is "" until
+  // then.
+  @MainActor
+  func regenerateTitle(
     readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList,
     recognizingImageText: Bool = true
-  ) -> String {
+  ) {
     if let imageSource = imageSource(readableBy: allowList) {
+      setTitle("", source: imageSource.titleSource)
       if recognizingImageText {
         recognizeTitle(from: imageSource)
       }
+      return
+    }
+
+    guard let found = titleText(readableBy: allowList) else {
+      setTitle("", source: .nothing)
+      return
+    }
+
+    setTitle(Self.formatTitle(found.text), source: .content(found.type))
+  }
+
+  // After the contents changed or a storage policy was applied: a derived
+  // title whose source `allowList` doesn't allow, or which the item no longer
+  // has, is made again from what it does allow. A title of unknown source is
+  // made again when the contents changed. Returns whether it was.
+  @MainActor
+  @discardableResult
+  func reconcileTitle(
+    readableBy allowList: StorageAllowList,
+    contentsChanged: Bool,
+    recognizingImageText: Bool = true
+  ) -> Bool {
+    guard titleSource != .user,
+          !storedTitleIsReadable(by: allowList, contentsChanged: contentsChanged) else {
+      return false
+    }
+
+    regenerateTitle(readableBy: allowList, recognizingImageText: recognizingImageText)
+    return true
+  }
+
+  // When "show special symbols" changes: a title derived from text is made
+  // again. Aliases and image titles are kept.
+  @MainActor
+  func regenerateTitleForSpecialSymbols() {
+    switch titleSource {
+    case .user, .universalClipboardImage:
+      return
+    case .content(let type) where StorageType.images.types.contains(NSPasteboard.PasteboardType(type)):
+      return
+    case .unknown where imageSource(readableBy: StoragePolicy.currentReadAllowList) != nil:
+      return
+    default:
+      regenerateTitle(recognizingImageText: false)
+    }
+  }
+
+  // Whether the stored title came from something `allowList` lets Maccy read
+  // that the item still has. A title of unknown source predates recorded
+  // sources; an item stored then was never stripped, so its title came from
+  // its contents or the user, and it is shown while every one of its
+  // representations may be read and the contents haven't just changed.
+  private func storedTitleIsReadable(by allowList: StorageAllowList, contentsChanged: Bool = false) -> Bool {
+    switch titleSource {
+    case .user:
+      return true
+    case .content(let type):
+      return allowList.allows(NSPasteboard.PasteboardType(type)) && contents.contains { $0.type == type }
+    case .universalClipboardImage:
+      if case .universalClipboardFile = imageSource(readableBy: allowList) {
+        return true
+      }
+      return false
+    case .nothing:
+      return false
+    case .unknown:
+      return !contentsChanged && contents.allSatisfy { allowList.allows(NSPasteboard.PasteboardType($0.type)) }
+    }
+  }
+
+  // A derived title made only from representations `allowList` lets Maccy
+  // read, without recording it or recognising image text. There is no
+  // fallback to the previous title.
+  @MainActor
+  func generateTitle(readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList) -> String {
+    guard imageSource(readableBy: allowList) == nil, let found = titleText(readableBy: allowList) else {
       return ""
     }
 
-    guard let text = titleText(readableBy: allowList)?.text else {
-      return ""
-    }
-
-    return Self.formatTitle(text)
+    return Self.formatTitle(found.text)
   }
 
-  // The representation a derived title is made from.
-  func titleSource(readableBy allowList: StorageAllowList) -> HistoryItemTitleSource? {
-    if let imageSource = imageSource(readableBy: allowList) {
-      return .image(imageSource)
-    }
-
-    return titleText(readableBy: allowList)?.source
-  }
-
-  // Applies the text recognised in an image as the title, unless that image is
-  // no longer the one the title would be made from (it was removed or its type
-  // is no longer allowed), the item is gone, or the user set the title.
+  // Applies the text recognised in an image as the title, unless the title no
+  // longer comes from that image (the user set one, or it was made again from
+  // something else), the image may no longer be read, or the item is gone.
   @MainActor
   @discardableResult
   func acceptRecognizedText(_ text: String, from source: HistoryItemImageSource) -> Bool {
-    guard modelContext != nil, !isDeleted, !hasCustomTitle,
+    guard modelContext != nil, !isDeleted, titleSource == source.titleSource,
           imageSource(readableBy: StoragePolicy.currentReadAllowList) == source else {
       return false
     }
 
-    title = text
+    setTitle(text, source: source.titleSource)
     return true
+  }
+
+  // Heals a title stored before unsafe scalars were removed on generation.
+  // The source is unchanged. Returns whether the title changed.
+  func removeScalarsUnsafeForTitleLayout() -> Bool {
+    guard title.containsScalarsUnsafeForTitleLayout else {
+      return false
+    }
+
+    setTitle(title.removingScalarsUnsafeForTitleLayout(), source: titleSource)
+    return true
+  }
+
+  // The stored title and its source, so the storage clean-up can put them
+  // back if it fails. Opaque outside this file.
+  struct TitleSnapshot: Equatable {
+    fileprivate let title: String
+    fileprivate let source: String
+  }
+
+  var titleSnapshot: TitleSnapshot { TitleSnapshot(title: title, source: titleSourceValue) }
+
+  func restoreTitle(_ snapshot: TitleSnapshot) {
+    title = snapshot.title
+    titleSourceValue = snapshot.source
   }
 
   @MainActor
@@ -200,41 +349,42 @@ class HistoryItem {
     return title
   }
 
-  // The text a title or preview is made from: file paths, else plain text,
-  // else rich text, else HTML.
-  private func titleText(readableBy allowList: StorageAllowList) -> (source: HistoryItemTitleSource, text: String)? {
+  // The text a title or preview is made from, and its type: file paths, else
+  // plain text, else rich text, else HTML.
+  private func titleText(readableBy allowList: StorageAllowList) -> (type: String, text: String)? {
     let urls = fileURLs(readableBy: allowList)
     if !urls.isEmpty, let content = firstContent([.fileURL], readableBy: allowList) {
       let text = urls
         .compactMap { $0.absoluteString.removingPercentEncoding }
         .joined(separator: "\n")
-      return (.text(content.type, ObjectIdentifier(content)), text)
+      return (content.type, text)
     }
 
     if let content = firstContent([.string], readableBy: allowList),
        let text = content.value.flatMap({ String(data: $0, encoding: .utf8) }), !text.isEmpty {
-      return (.text(content.type, ObjectIdentifier(content)), text)
+      return (content.type, text)
     }
 
     if let content = firstContent([.rtf], readableBy: allowList),
        let text = content.value.flatMap({ NSAttributedString(rtf: $0, documentAttributes: nil)?.string }),
        !text.isEmpty {
-      return (.text(content.type, ObjectIdentifier(content)), text)
+      return (content.type, text)
     }
 
     if let content = firstContent([.html], readableBy: allowList),
        let text = content.value.flatMap({ NSAttributedString(html: $0, documentAttributes: nil)?.string }),
        !text.isEmpty {
-      return (.text(content.type, ObjectIdentifier(content)), text)
+      return (content.type, text)
     }
 
     return nil
   }
 
-  // Shown in the preview. Falls back to the title, which for an image is the
-  // recognised text.
+  // Shown in the preview and the menu bar. Falls back to the title that may
+  // be shown, which for an image is the recognised text.
   var previewableText: String {
-    titleText(readableBy: StoragePolicy.currentReadAllowList)?.text ?? title
+    let allowList = StoragePolicy.currentReadAllowList
+    return titleText(readableBy: allowList)?.text ?? displayTitle(readableBy: allowList)
   }
 
   // MARK: Reading contents
@@ -351,8 +501,8 @@ class HistoryItem {
 
   // Replaces the item's contents with edited plain text. Every other
   // representation is deleted, not just detached, so the pre-edit content does
-  // not linger in the store. Does nothing and returns false unless the policy
-  // is valid and allows storing plain text.
+  // not linger in the store, nor in a derived title. Does nothing and returns
+  // false unless the policy is valid and allows storing plain text.
   @MainActor
   @discardableResult
   func replaceText(with data: Data, storing policy: StoragePolicy) -> Bool {
@@ -369,6 +519,10 @@ class HistoryItem {
       contents[index].value = data
     } else {
       contents.append(HistoryItemContent(type: stringType, value: data))
+    }
+    // A derived title follows the edited text; an alias is kept.
+    if titleSource != .user {
+      regenerateTitle(readableBy: policy.readAllowList, recognizingImageText: false)
     }
 
     return true
@@ -462,8 +616,52 @@ nonisolated enum HistoryItemImageSource: Equatable {
   case universalClipboardFile(URL)
 }
 
-// The representation a derived title is made from.
-nonisolated enum HistoryItemTitleSource: Equatable {
-  case image(HistoryItemImageSource)
-  case text(String, ObjectIdentifier)
+// What a stored title was made from. Recorded when the title is set.
+nonisolated enum HistoryItemTitleSource: Equatable, Sendable {
+  // An alias the user typed.
+  case user
+  // The representation of this type (for an image type, its recognised text).
+  case content(String)
+  // The recognised text of the file a Universal Clipboard image points to.
+  case universalClipboardImage
+  // Derived, but there was nothing to make it from: the title is empty.
+  case nothing
+  // Stored before titles recorded their source.
+  case unknown
+
+  private static let userValue = "org.p0deje.Maccy.title.user"
+  private static let universalClipboardImageValue = "org.p0deje.Maccy.title.universalClipboardImage"
+  private static let nothingValue = "org.p0deje.Maccy.title.nothing"
+  private static let unknownValue = "org.p0deje.Maccy.title.unknown"
+  private static let contentPrefix = "content:"
+
+  init(rawValue: String) {
+    switch rawValue {
+    case Self.userValue: self = .user
+    case Self.universalClipboardImageValue: self = .universalClipboardImage
+    case Self.nothingValue: self = .nothing
+    case _ where rawValue.hasPrefix(Self.contentPrefix):
+      self = .content(String(rawValue.dropFirst(Self.contentPrefix.count)))
+    default: self = .unknown
+    }
+  }
+
+  var rawValue: String {
+    switch self {
+    case .user: Self.userValue
+    case .content(let type): Self.contentPrefix + type
+    case .universalClipboardImage: Self.universalClipboardImageValue
+    case .nothing: Self.nothingValue
+    case .unknown: Self.unknownValue
+    }
+  }
+}
+
+extension HistoryItemImageSource {
+  var titleSource: HistoryItemTitleSource {
+    switch self {
+    case .content(let type, _): .content(type)
+    case .universalClipboardFile: .universalClipboardImage
+    }
+  }
 }

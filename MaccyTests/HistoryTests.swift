@@ -43,7 +43,7 @@ extension SharedStateTests {
     @Test("Adding persisted duplicate")
     func addingPersistedDuplicate() throws {
       let first = historyItem("foo")
-      first.title = "xyz"
+      first.setTitle("xyz", source: .user)
       first.application = "iTerm.app"
       history.added(first)
       first.pin = "f"
@@ -58,7 +58,7 @@ extension SharedStateTests {
       #expect(merged.item.lastCopiedAt > merged.item.firstCopiedAt)
       #expect(merged.item.numberOfCopies == 2)
       #expect(merged.item.pin == "f")
-      #expect(merged.item.title == "xyz")
+      #expect(merged.item.displayTitle == "xyz")
       #expect(merged.item.application == "iTerm.app")
       try assertStorageCounts(items: 1, contents: 1)
     }
@@ -67,7 +67,7 @@ extension SharedStateTests {
     @available(macOS 15.0, *)
     func addingUnsavedDuplicate() throws {
       let first = historyItem("foo")
-      first.title = "xyz"
+      first.setTitle("xyz", source: .user)
       first.application = "iTerm.app"
       history.added(first)
       first.pin = "f"
@@ -82,7 +82,7 @@ extension SharedStateTests {
       #expect(merged.item.lastCopiedAt > merged.item.firstCopiedAt)
       #expect(merged.item.numberOfCopies == 2)
       #expect(merged.item.pin == "f")
-      #expect(merged.item.title == "xyz")
+      #expect(merged.item.displayTitle == "xyz")
       #expect(merged.item.application == "iTerm.app")
       try assertStorageCounts(items: 1, contents: 1)
     }
@@ -103,7 +103,7 @@ extension SharedStateTests {
       Storage.shared.context.insert(firstItem)
       firstItem.application = "Maccy.app"
       firstItem.contents = firstContents
-      firstItem.title = firstItem.generateTitle()
+      firstItem.regenerateTitle()
       history.added(firstItem)
 
       let secondContents = [
@@ -116,7 +116,7 @@ extension SharedStateTests {
       Storage.shared.context.insert(secondItem)
       secondItem.application = "Maccy.app"
       secondItem.contents = secondContents
-      secondItem.title = secondItem.generateTitle()
+      secondItem.regenerateTitle()
       let second = history.added(secondItem)
 
       #expect(history.items.toArray() == [second])
@@ -482,7 +482,7 @@ extension SharedStateTests {
       }
       item.contents = contents
       item.numberOfCopies = 1
-      item.title = item.generateTitle()
+      item.regenerateTitle()
 
       return item
     }

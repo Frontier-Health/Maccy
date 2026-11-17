@@ -6,7 +6,7 @@ import Defaults
 // toggles, the default preference value, the clipboard watcher's filter and the
 // history store's clean-up are all derived from it, so a type cannot be offered
 // by a toggle without being covered by the filter.
-nonisolated struct StorageType: Sendable, Identifiable {
+nonisolated struct StorageType: Sendable, Identifiable, Equatable {
   static let files = StorageType(id: "Files", types: [.fileURL])
   static let images = StorageType(id: "Images", types: [.png, .tiff, .jpeg, .heic])
   static let text = StorageType(id: "Text", types: [.html, .rtf, .string])
@@ -243,4 +243,51 @@ nonisolated enum StorageToggleChange: Equatable {
 
     return impact.affectsHistory ? .confirm(enabledTypes, impact) : .apply(enabledTypes)
   }
+
+  // What confirming `pending` does now. The dialog asked about an operation
+  // (one toggle, on or off), not a resulting value, so it is worked out again
+  // from the setting as it is now:
+  // - a value a configuration profile now forces is not written over;
+  // - if turning the toggle now removes nothing, the new value is written,
+  //   as flipping the toggle would;
+  // - if the new value or the counts differ from what the dialog showed, it
+  //   is shown again with the new ones rather than applied;
+  // - otherwise the new value is written.
+  static func confirming(
+    _ pending: PendingStorageToggleChange,
+    from policy: StoragePolicy,
+    impact: (StorageAllowList) throws -> StorageCleanUpImpact
+  ) -> StorageToggleConfirmation {
+    switch change(from: policy, setting: pending.toggle, to: pending.isOn, impact: impact) {
+    case .refused:
+      return .refused
+    case .apply(let enabledTypes):
+      return .apply(enabledTypes)
+    case .confirm(let enabledTypes, let impact):
+      let current = PendingStorageToggleChange(
+        toggle: pending.toggle, isOn: pending.isOn, enabledTypes: enabledTypes, impact: impact
+      )
+      return current == pending ? .apply(enabledTypes) : .reconfirm(current)
+    }
+  }
+}
+
+// A toggle change waiting for confirmation: the operation the user asked for,
+// and the new value and counts the dialog showed for it.
+nonisolated struct PendingStorageToggleChange: Equatable {
+  let toggle: StorageType
+  let isOn: Bool
+  let enabledTypes: Set<NSPasteboard.PasteboardType>
+  // nil when it could not be counted.
+  let impact: StorageCleanUpImpact?
+}
+
+// What confirming a pending toggle change does.
+nonisolated enum StorageToggleConfirmation: Equatable {
+  // The value is now managed by a configuration profile; nothing is written.
+  case refused
+  // Write this value.
+  case apply(Set<NSPasteboard.PasteboardType>)
+  // The setting changed meanwhile: ask again about this.
+  case reconfirm(PendingStorageToggleChange)
 }

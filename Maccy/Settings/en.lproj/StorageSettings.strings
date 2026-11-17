@@ -4,8 +4,8 @@
 "Images" = "Images";
 "Text" = "Text";
 "SaveDescription" = "Change what types of copied content are saved. Turning a type off removes that data from existing history, including pinned items, and turning it back on does not restore it. Other data apps put on the clipboard is never saved.";
-"InvalidSaveTypes" = "The saved list of content types is invalid. Maccy is not saving anything you copy until it is fixed: turn on the types to save. Existing history is kept as it is.";
-"InvalidManagedSaveTypes" = "The list of content types in your configuration profile is invalid. Maccy is not saving anything you copy until your administrator fixes it. Existing history is kept as it is.";
+"InvalidSaveTypes" = "The saved list of content types is invalid. Until it is fixed, Maccy is not saving new copies and is not removing stored data to match this setting: turn on the types to save. Aliases, pins and the clear actions still work.";
+"InvalidManagedSaveTypes" = "The list of content types in your configuration profile is invalid. Until your administrator fixes it, Maccy is not saving new copies and is not removing stored data to match this setting. Aliases, pins and the clear actions still work.";
 "ManagedSaveTypes" = "These settings are controlled by a configuration profile. Only your administrator can change them.";
 "RemoveStoredDataTitle" = "Remove this data from history?";
 "RemoveStoredDataMessage" = "%1$lld items in history will lose data and %2$lld items will be removed entirely, including pinned items. This cannot be undone.";

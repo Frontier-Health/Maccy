@@ -44,14 +44,14 @@ extension SharedStateTests {
 
     @Test("Title for string", arguments: stringTitleCases)
     func titleForString(input: String, title: String) {
-      #expect(historyItem(input).title == title)
+      #expect(historyItem(input).displayTitle == title)
     }
 
     // U+FFFC arrives from rich text with inline attachments and hangs CoreText
     // on macOS 26. See https://github.com/p0deje/Maccy/issues/1520.
     @Test("Title without object replacement characters", arguments: objectReplacementTitleCases)
     func titleWithObjectReplacementCharacters(input: String, title: String) {
-      #expect(historyItem(input).title == title)
+      #expect(historyItem(input).displayTitle == title)
     }
 
     @Test("Title for RTF")
@@ -60,35 +60,35 @@ extension SharedStateTests {
         from: NSRange(0...2),
         documentAttributes: [:]
       )
-      #expect(historyItem(rtf, .rtf).title == "foo")
+      #expect(historyItem(rtf, .rtf).displayTitle == "foo")
     }
 
     @Test("Title for HTML")
     func titleWithHTML() {
       let html = "<a href='#'>foo</a>".data(using: .utf8)
-      #expect(historyItem(html, .html).title == "foo")
+      #expect(historyItem(html, .html).displayTitle == "foo")
     }
 
     @Test("Image has an empty title")
     func image() throws {
       let image = try #require(NSImage(named: "NSBluetoothTemplate"))
-      #expect(historyItem(image).title == "")
+      #expect(historyItem(image).displayTitle == "")
     }
 
     @Test("Image title becomes the recognized text")
     func imageTitleBecomesRecognizedText() async throws {
       let item = historyItem(textImage("Hello Maccy"))
       let deadline = ContinuousClock.now + .seconds(10)
-      while item.title.isEmpty && ContinuousClock.now < deadline {
+      while item.displayTitle.isEmpty && ContinuousClock.now < deadline {
         try await Task.sleep(for: .milliseconds(100))
       }
-      #expect(item.title == "Hello Maccy")
+      #expect(item.displayTitle == "Hello Maccy")
     }
 
     @Test("Title for file", arguments: ["/tmp/foo.bar", "/tmp/产品培训/产品培训.txt"])
     func file(path: String) {
       let url = URL(fileURLWithPath: path)
-      #expect(historyItem(url).title == "file://\(path)")
+      #expect(historyItem(url).displayTitle == "file://\(path)")
     }
 
     @Test("Text from Universal Clipboard")
@@ -109,8 +109,8 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = [fileURLContent, textContent, universalClipboardContent]
-      item.title = item.generateTitle()
-      #expect(item.title == "foo.bar")
+      item.regenerateTitle()
+      #expect(item.displayTitle == "foo.bar")
     }
 
     @Test("Image from Universal Clipboard")
@@ -146,13 +146,13 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = [fileURLContent, universalClipboardContent]
-      item.title = item.generateTitle()
-      #expect(item.title == "file:///tmp/foo.bar")
+      item.regenerateTitle()
+      #expect(item.displayTitle == "file:///tmp/foo.bar")
     }
 
     @Test("Item without data has an empty title")
     func itemWithoutData() {
-      #expect(historyItem(nil).title == "")
+      #expect(historyItem(nil).displayTitle == "")
     }
 
     @Test("Several items can have an empty pin")
@@ -178,7 +178,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
 
       return item
     }
@@ -193,7 +193,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
 
       return item
     }
@@ -208,7 +208,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
 
       return item
     }
@@ -227,7 +227,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
 
       return item
     }

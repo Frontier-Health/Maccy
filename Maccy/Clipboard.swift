@@ -8,6 +8,11 @@ class Clipboard {
   typealias OnNewCopyHook = (HistoryItem) -> Void
 
   private var onNewCopyHooks: [OnNewCopyHook] = []
+  #if DEBUG
+  // Runs after the pasteboard is inspected and before the copy is skipped or
+  // recorded, so tests can change settings at that point.
+  var afterInspectionForTesting: (() -> Void)?
+  #endif
   var changeCount: Int
 
   private let pasteboard = NSPasteboard.general
@@ -127,8 +132,9 @@ class Clipboard {
     pasteboard.setString(item.application ?? "", forType: .source)
     sync()
 
+    let body = Notifier.body(for: item)
     Task {
-      Notifier.notify(body: item.title, sound: .knock)
+      Notifier.notify(body: body, sound: .knock)
       checkForChangesInPasteboard()
     }
   }
@@ -252,10 +258,21 @@ class Clipboard {
       return
     }
 
+    #if DEBUG
+    afterInspectionForTesting?()
+    #endif
+
     if captureMode == .skipNext {
       // This copy would have been recorded, so it is the one to skip. Maccy's
-      // own writes don't count.
+      // own writes don't count. The storage setting may have changed while
+      // the pasteboard was inspected, so whether the copy would be recorded
+      // is decided again with the setting read now: a copy `add` would refuse
+      // doesn't use up the skip.
       let isMaccySource = pasteboard.string(forType: .source) == NSPasteboard.PasteboardType.fromMaccy.rawValue
+      guard let currentAllowList = StoragePolicy.current.allowList,
+            currentAllowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
+        return
+      }
       if !isFromMaccy && !isMaccySource {
         CaptureMode.consumeSkip(in: capturePreferences)
         // The watcher's own write is not an uncertain transition, so the copy
@@ -277,7 +294,7 @@ class Clipboard {
     }
 
     historyItem.application = sourceApp?.bundleIdentifier
-    historyItem.title = historyItem.generateTitle()
+    historyItem.regenerateTitle()
 
     onNewCopyHooks.forEach({ $0(historyItem) })
   }

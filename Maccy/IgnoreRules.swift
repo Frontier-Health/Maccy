@@ -12,8 +12,8 @@ final class IgnoreRules {
   static let patternLimit = 4_096
   static let ruleLimit = 128
   // Representations whose text the rules match, in every pasteboard item. A
-  // file URL is matched as its percent-decoded URL, path and file name, the
-  // text history shows for it; the file's contents are not read.
+  // file URL is matched as its percent-decoded path, which includes the file
+  // name; the file's contents are not read.
   static let inspectedTypes: [NSPasteboard.PasteboardType] = [.string, .fileURL, .rtf, .html]
 
   private enum Stored: Equatable {
@@ -260,8 +260,10 @@ final class IgnoreRules {
     [.string, .fileURL, .html].firstIndex(of: type) ?? 3
   }
 
+  // One text per file, so each file is charged once against the text limit:
+  // the percent-decoded path, which ends with the file name.
   static func fileURLTexts(_ url: URL) -> [String] {
-    [url.absoluteString.removingPercentEncoding ?? url.absoluteString, url.path(percentEncoded: false), url.lastPathComponent]
+    [url.path(percentEncoded: false)]
   }
 
   static func normalizedTextKey(_ text: String) -> String {

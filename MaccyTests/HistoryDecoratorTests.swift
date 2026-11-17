@@ -145,7 +145,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
       item.application = application
       item.firstCopiedAt = firstCopiedAt
       item.lastCopiedAt = lastCopiedAt
@@ -166,7 +166,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
       item.application = "com.apple.finder"
       item.firstCopiedAt = firstCopiedAt
       item.lastCopiedAt = lastCopiedAt
@@ -185,7 +185,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
       item.application = "com.apple.finder"
       item.firstCopiedAt = firstCopiedAt
       item.lastCopiedAt = lastCopiedAt
@@ -208,7 +208,7 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = contents
-      item.title = item.generateTitle()
+      item.regenerateTitle()
       item.application = "com.apple.finder"
       item.firstCopiedAt = firstCopiedAt
       item.lastCopiedAt = lastCopiedAt

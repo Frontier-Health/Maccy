@@ -5,16 +5,11 @@ import Settings
 struct StorageSettingsPane: View {
   @Observable
   class ViewModel {
-    // A change that would remove stored data, waiting for confirmation.
-    struct PendingChange {
-      let enabledTypes: Set<NSPasteboard.PasteboardType>
-      let impact: StorageCleanUpImpact?
-    }
-
     // The effective setting, including a value forced by a configuration
     // profile or an invalid stored value.
     private(set) var policy = StoragePolicy.current
-    var pendingChange: PendingChange?
+    // A change that would remove stored data, waiting for confirmation.
+    var pendingChange: PendingStorageToggleChange?
 
     private var observer: Defaults.Observation?
 
@@ -32,9 +27,8 @@ struct StorageSettingsPane: View {
       Binding(
         get: { self.policy.isEnabled(toggle) },
         set: { isOn in
-          let change = StorageToggleChange.change(from: StoragePolicy.current, setting: toggle, to: isOn) {
-            try Storage.shared.cleanUpImpact(of: $0)
-          }
+          let change = StorageToggleChange.change(from: StoragePolicy.current, setting: toggle, to: isOn,
+                                                  impact: { try Self.impact(of: $0) })
           switch change {
           case .refused:
             break
@@ -42,17 +36,34 @@ struct StorageSettingsPane: View {
             self.write(enabledTypes)
           case .confirm(let enabledTypes, let impact):
             // Until confirmed the toggle keeps showing the stored value.
-            self.pendingChange = PendingChange(enabledTypes: enabledTypes, impact: impact)
+            self.pendingChange = PendingStorageToggleChange(
+              toggle: toggle, isOn: isOn, enabledTypes: enabledTypes, impact: impact
+            )
           }
         }
       )
     }
 
-    func confirmPendingChange() {
-      if let pendingChange {
-        write(pendingChange.enabledTypes)
-      }
+    // Confirms the change the dialog showed. It is checked against the
+    // setting as it is now (see `StorageToggleChange.confirming`): a value now
+    // forced is left alone, and a changed value or count is asked about again.
+    func confirm(_ change: PendingStorageToggleChange) {
       pendingChange = nil
+      let confirmation = StorageToggleChange.confirming(change, from: StoragePolicy.current) {
+        try Self.impact(of: $0)
+      }
+      switch confirmation {
+      case .refused:
+        policy = StoragePolicy.current
+      case .apply(let enabledTypes):
+        write(enabledTypes)
+      case .reconfirm(let updated):
+        policy = StoragePolicy.current
+        // Shown once the current dialog has gone.
+        Task { @MainActor in
+          self.pendingChange = updated
+        }
+      }
     }
 
     func cancelPendingChange() {
@@ -65,7 +76,11 @@ struct StorageSettingsPane: View {
     private func write(_ enabledTypes: Set<NSPasteboard.PasteboardType>) {
       Defaults[.enabledPasteboardTypes] = enabledTypes
       policy = StoragePolicy.current
-      History.shared.enforceStoragePolicy()
+      History.shared.storageSettingChanged()
+    }
+
+    private static func impact(of allowList: StorageAllowList) throws -> StorageCleanUpImpact {
+      try Storage.shared.cleanUpImpact(of: allowList)
     }
   }
 
@@ -151,9 +166,9 @@ struct StorageSettingsPane: View {
         }
       ),
       presenting: viewModel.pendingChange
-    ) { _ in
+    ) { change in
       Button(Self.removeStoredDataConfirm, role: .destructive) {
-        viewModel.confirmPendingChange()
+        viewModel.confirm(change)
       }
       Button(Self.removeStoredDataCancel, role: .cancel) {
         viewModel.cancelPendingChange()
@@ -169,19 +184,21 @@ struct StorageSettingsPane: View {
     NSLocalizedString(key, tableName: "StorageSettings", value: value, comment: "")
   }
 
-  private static var invalidSaveTypes: String {
+  static var invalidSaveTypes: String {
     localized(
       "InvalidSaveTypes",
-      "The saved list of content types is invalid. Maccy is not saving anything you copy until it is fixed: " +
-        "turn on the types to save. Existing history is kept as it is."
+      "The saved list of content types is invalid. Until it is fixed, Maccy is not saving new copies and is " +
+        "not removing stored data to match this setting: turn on the types to save. Aliases, pins and the " +
+        "clear actions still work."
     )
   }
 
-  private static var invalidManagedSaveTypes: String {
+  static var invalidManagedSaveTypes: String {
     localized(
       "InvalidManagedSaveTypes",
-      "The list of content types in your configuration profile is invalid. Maccy is not saving anything you " +
-        "copy until your administrator fixes it. Existing history is kept as it is."
+      "The list of content types in your configuration profile is invalid. Until your administrator fixes it, " +
+        "Maccy is not saving new copies and is not removing stored data to match this setting. Aliases, pins " +
+        "and the clear actions still work."
     )
   }
 

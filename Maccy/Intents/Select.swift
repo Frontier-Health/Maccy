@@ -28,12 +28,19 @@ struct Select: AppIntent, CustomIntentMigratedAppIntent {
         throw AppIntentError.notFound
       }
 
-      let value = items[index].title
+      let value = Self.value(of: items[index])
       AppState.shared.history.select(items[index], flags: .currentModifierFlags)
 
       return value
     }
 
     return .result(value: value)
+  }
+
+  // What the intent returns for an item: its title that may be shown under
+  // the current storage policy.
+  @MainActor
+  static func value(of item: HistoryItemDecorator) -> String {
+    item.item.displayTitle
   }
 }

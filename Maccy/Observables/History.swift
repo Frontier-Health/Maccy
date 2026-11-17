@@ -83,8 +83,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   // The storage policy the store was last brought in line with.
   @ObservationIgnored
   private var enforcedStoragePolicy: StoragePolicy?
-  // A policy whose clean-up failed. It is retried on the next launch or the
-  // next change of the setting, not on every load or search.
+  // The policy whose clean-up failed in the current attempt. Loads, searches
+  // and intents don't retry it; the next settings-change event (any value,
+  // including one back to an earlier policy) or the next launch does.
   @ObservationIgnored
   private var failedStoragePolicy: StoragePolicy?
 
@@ -106,7 +107,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     // Turning a storage type off removes it from existing history too.
     Task {
       for await _ in Defaults.updates(.enabledPasteboardTypes, initial: false) {
-        try? await load()
+        storageSettingChanged()
       }
     }
 
@@ -162,19 +163,35 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     }
   }
 
+  // A new attempt to apply the storage setting: after any change of the
+  // setting, whatever its value. A failed earlier attempt doesn't hold this
+  // one back. Decorators are rebuilt either way, so every title shown is
+  // checked against the policy now in effect. Returns whether stored history
+  // changed.
+  @MainActor
+  @discardableResult
+  func storageSettingChanged() -> Bool {
+    failedStoragePolicy = nil
+    let changed = enforceStoragePolicy(reloadingItems: false)
+    try? reloadItems()
+    return changed
+  }
+
   // Brings stored history in line with the current storage policy. Runs at
-  // launch, on every load (including the one each change of the setting
-  // triggers), right after the settings write a new value, and before the
-  // Get and Select intents read history. It does work only when the policy
-  // differs from the last one applied. Changed items' decorators are rebuilt,
-  // so the list, search and the intents see regenerated titles.
+  // launch, on every load, after every change of the setting (see
+  // `storageSettingChanged`) and before the Get and Select intents read
+  // history. It does work only when the policy differs from the last one
+  // applied and hasn't already failed in this attempt.
   //
   // An invalid policy leaves history exactly as it is: nothing is deleted.
   // Capture stops separately (see Clipboard).
   //
   // A valid policy strips what it doesn't allow, whether the change came from
   // the settings (which confirm first), a configuration profile or an outside
-  // write. Returns whether stored history changed.
+  // write. If that fails, history is left as it was; what may be shown is
+  // still decided by the policy when it is read (`HistoryItem.displayTitle`
+  // and the content accessors), so nothing it excludes is shown meanwhile.
+  // Returns whether stored history changed.
   @MainActor
   @discardableResult
   func enforceStoragePolicy(reloadingItems: Bool = true) -> Bool {
@@ -186,7 +203,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     guard let allowList = policy.allowList else {
       enforcedStoragePolicy = policy
       failedStoragePolicy = nil
-      logger.warning("Storage setting is invalid: not saving copies, history left unchanged")
+      logger.warning("Storage setting is invalid: not saving new copies, stored history left unchanged")
+      if reloadingItems {
+        try? reloadItems()
+      }
       return false
     }
 
@@ -199,16 +219,15 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
         Failed to apply storage settings to history (\(Storage.errorCategory(error))). \
         History is unchanged; disallowed data stays hidden. Retrying on next launch or setting change.
         """)
-      hideTitlesOfDisallowedContent(readableBy: allowList)
+      if reloadingItems {
+        try? reloadItems()
+      }
       return false
     }
 
     enforcedStoragePolicy = policy
     failedStoragePolicy = nil
     logger.notice("\(result.logMessage)")
-    guard result.hasChanges else {
-      return false
-    }
 
     for decorator in allPinnedItems + allUnpinnedItems
     where result.changedItems.contains(where: { $0 === decorator.item }) {
@@ -217,19 +236,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     if reloadingItems {
       try? reloadItems()
     }
-    return true
-  }
-
-  // After a failed clean-up, shows derived titles made only from what may be
-  // read, without changing the store. A title the user set is kept.
-  @MainActor
-  private func hideTitlesOfDisallowedContent(readableBy allowList: StorageAllowList) {
-    for decorator in allPinnedItems + allUnpinnedItems where !decorator.item.hasCustomTitle {
-      let types = decorator.item.contents.map { NSPasteboard.PasteboardType($0.type) }
-      guard !types.allSatisfy(allowList.allows) else { continue }
-      decorator.cleanupImages()
-      decorator.title = decorator.item.generateTitle(readableBy: allowList, recognizingImageText: false)
-    }
+    return result.hasChanges
   }
 
   @MainActor
@@ -243,35 +250,39 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   // and saves it. An item left with no allowed content, or any item while the
   // policy is invalid, is not stored (and is removed if it already was).
   // Every path that adds a copy to history goes through here, including the
-  // early insertion macOS 14 needs.
+  // early insertion macOS 14 needs. If the save fails the item is removed
+  // from the context, so nothing of it stays pending for a later save, and
+  // this returns false.
   @MainActor
   @discardableResult
   func insertIntoStorage(_ item: HistoryItem) -> Bool {
-    let context = Storage.shared.context
+    let storage = Storage.shared
+    let context = storage.context
     let allowList = StoragePolicy.current.allowList
-    let changed = allowList.map { Storage.shared.sanitize(item, to: $0) } ?? false
+    let changed = allowList.map { storage.sanitize(item, to: $0) } ?? false
     guard let allowList,
           allowList.hasStorableContent(item.contents.map { NSPasteboard.PasteboardType($0.type) }) else {
       if item.modelContext != nil {
         deleteFromStorage(item)
         context.processPendingChanges()
-        try? context.save()
+        try? storage.save()
       }
       return false
     }
 
-    if changed && !item.hasCustomTitle && !item.title.isEmpty {
-      item.title = item.generateTitle(readableBy: allowList)
-    }
+    item.reconcileTitle(readableBy: allowList, contentsChanged: changed)
 
     if item.modelContext == nil {
       context.insert(item)
     }
     context.processPendingChanges()
     do {
-      try context.save()
+      try storage.save()
     } catch {
       logger.error("Failed to save a new history item (\(Storage.errorCategory(error)))")
+      deleteFromStorage(item)
+      context.processPendingChanges()
+      return false
     }
     return true
   }
@@ -287,35 +298,29 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
     var replacedPinnedItem: HistoryItemDecorator?
     if let existingHistoryItem = findSimilarItem(item) {
-      let existingTitleSource = existingHistoryItem.titleSource(readableBy: .everything)
       let transfersContents = isModified(item) == nil
+      var contentsChanged = false
       if transfersContents {
         transferContents(from: existingHistoryItem, to: item)
         // The older contents may predate the current policy.
         if let allowList = StoragePolicy.current.allowList {
-          Storage.shared.sanitize(item, to: allowList)
+          contentsChanged = Storage.shared.sanitize(item, to: allowList)
         }
       }
       item.firstCopiedAt = existingHistoryItem.firstCopiedAt
       item.numberOfCopies += existingHistoryItem.numberOfCopies
       item.pin = existingHistoryItem.pin
-      // A title the user set is kept. A derived title is kept only while the
-      // representation it was made from survives; otherwise it is made again
-      // from what did. A modified copy keeps the title of its own contents.
-      if existingHistoryItem.hasCustomTitle {
-        item.title = existingHistoryItem.title
-        item.hasCustomTitle = true
-      } else if transfersContents {
-        if item.titleSource(readableBy: StoragePolicy.currentReadAllowList) == existingTitleSource {
-          item.title = existingHistoryItem.title
-        } else {
-          item.title = item.generateTitle()
-        }
+      // An alias is kept. With the older contents comes their title, with the
+      // source it recorded; it is kept only while that source survives here.
+      // A modified copy keeps the title of its own contents.
+      if transfersContents || existingHistoryItem.titleSource == .user {
+        item.adoptTitle(of: existingHistoryItem)
+        item.reconcileTitle(readableBy: StoragePolicy.currentReadAllowList, contentsChanged: contentsChanged)
       }
       if !item.fromMaccy {
         item.application = existingHistoryItem.application
       }
-      logger.info("Removing duplicate item '\(item.title)'")
+      logger.info("Removing duplicate item")
       if let existingDecorator = firstStoredItem(where: { $0.item == existingHistoryItem }) {
         cleanup(existingDecorator)
         allUnpinnedItems.removeAll { $0 == existingDecorator }
@@ -325,8 +330,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       }
       deleteFromStorage(existingHistoryItem)
     } else {
+      let body = Notifier.body(for: item)
       Task {
-        Notifier.notify(body: item.title, sound: .write)
+        Notifier.notify(body: body, sound: .write)
       }
     }
 
@@ -527,7 +533,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     pasteStack = stack
 
     logger.info("Initialising PasteStack with \(stack.items.count) items")
-    logger.info("Copying \(item.item.title) from PasteStack")
+    logger.info("Copying the first item from PasteStack")
 
     if modifierFlags.isEmpty {
       AppState.shared.popup.close()
@@ -565,7 +571,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return
     }
 
-    logger.info("PasteStack pasted \(pasted.item.title)")
+    logger.info("PasteStack pasted an item")
 
     stack.items.removeFirst()
 
@@ -575,7 +581,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return
     }
 
-    logger.info("Copying \(item.item.title) from PasteStack. \(stack.items.count) items remaining in stack.")
+    logger.info("Copying the next item from PasteStack. \(stack.items.count) items remaining in stack.")
 
     Task {
       if stack.modifierFlags.isEmpty {
@@ -703,15 +709,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func updateTitlesForSpecialSymbols() {
-    for item in items where item.item.imageData == nil && !item.item.hasCustomTitle {
-      updateTitle(item: item, title: item.item.generateTitle())
+    for item in items {
+      item.item.regenerateTitleForSpecialSymbols()
+      item.refreshTitle()
     }
-  }
-
-  @MainActor
-  private func updateTitle(item: HistoryItemDecorator, title: String) {
-    item.title = title
-    item.item.title = title
   }
 
   private func updateUnpinnedShortcuts() {

@@ -17,7 +17,10 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
 
   let id = UUID()
 
-  var title: String = ""
+  // The item's `displayTitle`: what list rows, search, the Select intent and
+  // accessibility show. Kept in step with the item; `refreshTitle()` makes it
+  // re-read the storage policy too.
+  private(set) var title: String = ""
   var attributedTitle: AttributedString?
 
   var isVisible: Bool = true
@@ -116,7 +119,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   init(_ item: HistoryItem, shortcuts: [KeyShortcut] = []) {
     self.item = item
     self.shortcuts = shortcuts
-    self.title = item.title
+    self.title = item.displayTitle
     self.applicationImage = ApplicationImageCache.shared.getImage(item: item)
 
     synchronizeItemPin()
@@ -242,13 +245,20 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     }
   }
 
+  @MainActor
+  func refreshTitle() {
+    title = item.displayTitle
+  }
+
+  // Follows the stored title, its source and the contents, which together
+  // decide `displayTitle`.
   private func synchronizeItemTitle() {
     _ = withObservationTracking {
-      item.title
+      item.displayTitle
     } onChange: { [weak self] in
       DispatchQueue.main.async {
         guard let self else { return }
-        self.title = self.item.title
+        self.title = self.item.displayTitle
         self.synchronizeItemTitle()
       }
     }

@@ -8,6 +8,7 @@ struct IgnoreRegexpsSettingsView: View {
   @State private var drafts: [Int: String] = [:]
   @State private var selection: Int?
   @State private var saveFailed = false
+  @State private var addLimitReached = false
   @State private var confirmReset = false
   @State private var issue = IgnoreRules.configurationIssue()
 
@@ -39,11 +40,13 @@ struct IgnoreRegexpsSettingsView: View {
       }
       .onChange(of: ignoredRegexps) {
         drafts = [:]
+        addLimitReached = false
       }
 
       ControlGroup {
         Button("", systemImage: "plus") {
-          saveFailed = !IgnoreRules.save("^[a-zA-Z0-9]{50}$")
+          addLimitReached = ignoredRegexps.count >= IgnoreRules.ruleLimit
+          saveFailed = !addLimitReached && !IgnoreRules.save("^[a-zA-Z0-9]{50}$")
           focus = ignoredRegexps.indices.last
         }
         Button("", systemImage: "minus") {
@@ -61,12 +64,16 @@ struct IgnoreRegexpsSettingsView: View {
                 drafts = [:]
                 selection = nil
                 saveFailed = false
-                issue = IgnoreRules.configurationIssue()
               }
+              issue = IgnoreRules.configurationIssue()
             } label: { Text("ResetIgnoreRules", tableName: "IgnoreSettings") }
           }
       }
 
+      if addLimitReached {
+        Text("IgnoreRuleAddLimit", tableName: "IgnoreSettings")
+          .foregroundStyle(.red)
+      }
       if saveFailed {
         Text("InvalidIgnoreRuleDraft", tableName: "IgnoreSettings")
           .foregroundStyle(.red)

@@ -732,6 +732,138 @@ extension SharedStateTests {
       #expect(checkNow().isEmpty)
     }
 
+    @Test("NUL-terminated and embedded-NUL UTF-8 cannot bypass HTML rules")
+    func nulHTMLWatcher() throws {
+      Defaults[.ignoreRegexp] = ["SECRET"]
+      for html in ["<a href=SECRET>hi</a>\0", "<a href=SECRET>hi!</a>\0",
+                   "<a href=SEC\0RET>hi</a>", "<a href=SECRET>hi</a>\0\0"] {
+        pasteboard.declareTypes([.html], owner: nil)
+        pasteboard.setData(Data(html.utf8), forType: .html)
+        #expect(checkNow().isEmpty)
+      }
+      for encoding in [String.Encoding.utf16LittleEndian, .utf16BigEndian] {
+        pasteboard.declareTypes([.html], owner: nil)
+        pasteboard.setData(try #require("<a href=SECRET>hi</a>".data(using: encoding)), forType: .html)
+        #expect(checkNow().isEmpty)
+        pasteboard.declareTypes([.html], owner: nil)
+        pasteboard.setData(try #require("<p>ordinary text</p>".data(using: encoding)), forType: .html)
+        #expect(checkNow().count == 1)
+      }
+    }
+
+    @Test("Synthetic Word pictures do not exhaust RTF caps; surrounding text is checked")
+    func wordPictureWatcher() {
+      for rule in ["unmatched", "SECRET"] {
+        Defaults[.ignoreRegexp] = [rule]
+        copyString("ordinary")
+        pasteboard.addTypes([.rtf], owner: nil)
+        pasteboard.setData(ClipboardHTMLTextTests.wordPictureRTF("SECRET"), forType: .rtf)
+        #expect(checkNow().count == (rule == "SECRET" ? 0 : 1))
+      }
+      Defaults[.ignoreRegexp] = ["unmatched"]
+      copyString("ordinary")
+      pasteboard.addTypes([.rtf], owner: nil)
+      pasteboard.setData(ClipboardHTMLTextTests.wordPictureRTF("ordinary", pictureBytes: 2_500_000), forType: .rtf)
+      #expect(checkNow().count == 1) // Above 8 MiB raw; pictures must not consume the text-data allowance.
+    }
+
+    @Test("Empty derived text is skipped but blank plain text is matched")
+    func emptyDerivedWatcher() {
+      Defaults[.ignoreRegexp] = [#"^\s*$"#]
+      copyString("Hello world")
+      pasteboard.addTypes([.html], owner: nil)
+      pasteboard.setString("<p>Hello world</p>", forType: .html)
+      #expect(checkNow().count == 1)
+      copyString("")
+      #expect(checkNow().isEmpty)
+      copyString("   \n")
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Media addresses are excluded from hash-like rules; active-resource and link addresses remain")
+    func assetURLWatcher() {
+      Defaults[.ignoreRegexp] = [
+        #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#,
+        #"[A-Za-z0-9+/]{40,}={0,2}"#, #"\b[0-9a-fA-F]{32}\b"#
+      ]
+      for html in [
+        "<p>Mail</p><img src='https://mail.google.com/mail/u/0/?ui=2&attbid=ANGjdJ8" + String(repeating: "x", count: 80) + "'>",
+        "<p>Profile</p><img src='https://www.gravatar.com/avatar/0123456789abcdef0123456789abcdef'>",
+        "<p>Word</p><img src='file:///Users/Staff/Library/Group%20Containers/UBF8T346G9.Office/TemporaryItems/msohtmlclip1/01/clip_image001.png'>"
+      ] {
+        copyRichText(html, type: .html)
+        #expect(checkNow().count == 1)
+      }
+      Defaults[.ignoreRegexp] = ["SECRET"]
+      for element in ["img", "source", "video", "audio", "picture", "track", "image", "v:imagedata"] {
+        copyRichText("<p>ordinary</p><\(element) src=SECRET srcset=SECRET poster=SECRET>", type: .html)
+        #expect(checkNow().count == 1)
+      }
+      for html in ["<svg><image href=SECRET xlink:href=SECRET></image></svg>",
+                   "<input src=SECRET type=image>", "<input TYPE=IMAGE src=SECRET>"] {
+        copyRichText("<p>ordinary</p>" + html, type: .html)
+        #expect(checkNow().count == 1)
+      }
+      for html in ["<a href=SECRET>ordinary</a>", "<iframe src=SECRET></iframe>",
+                   "<script src=SECRET></script>", "<embed src=SECRET>", "<object src=SECRET></object>",
+                   "<input type=text src=SECRET>", "<img alt=SECRET src=safe>"] {
+        copyRichText("<p>ordinary</p>" + html, type: .html)
+        #expect(checkNow().isEmpty)
+      }
+    }
+
+    @Test("Data-looking JavaScript, nested metadata and text URLs retain secrets")
+    func dataURIWatcher() {
+      Defaults[.ignoreRegexp] = ["SECRET"]
+      for html in [#"<script>var c={data:1,key:"SECRET"}</script>"#,
+                   #"<p onclick="f({metadata:{a:1},token:'SECRET'})">ordinary</p>"#,
+                   #"<a href="https://x.test/cb?u=data:x,&t=SECRET">ordinary</a>"#,
+                   #"<a href="data:text/plain,SECRET">ordinary</a>"#] {
+        copyRichText("<p>ordinary</p>" + html, type: .html)
+        #expect(checkNow().isEmpty)
+      }
+      // A payload delimiter must not swallow a later secret in the same value/body.
+      for html in [#"<script>f('data:image/png;base64,AAAA');SECRET</script>"#,
+                   #"<a href="data:application/json,SECRET">ordinary</a>"#,
+                   #"<a href="metadata:image/png;base64,SECRET">ordinary</a>"#] {
+        copyRichText(html, type: .html)
+        #expect(checkNow().isEmpty)
+      }
+    }
+
+    @Test("Rules match original plain text including leading and trailing whitespace")
+    func originalWhitespaceWatcher() {
+      for (rule, text) in [(#"^\s+$"#, "   \n"), (#"\t$"#, "a\tb\t"), ("password: $", "password: ")] {
+        Defaults[.ignoreRegexp] = [rule]
+        copyString(text)
+        #expect(checkNow().isEmpty)
+      }
+    }
+
+    @Test("Realistic 300 by 10 Excel cells deduplicate tabs and HTML indentation")
+    func realisticTableWatcher() throws {
+      Defaults[.ignoreRegexp] = ["SECRET"]
+      let fixture = ClipboardHTMLTextTests.tableFixture(rows: 300)
+      copyString(fixture.plain)
+      pasteboard.addTypes([.html, .rtf], owner: nil)
+      pasteboard.setString(fixture.html, forType: .html)
+      let attributed = NSAttributedString(string: fixture.plain.replacingOccurrences(of: "\t", with: " "))
+      pasteboard.setData(try #require(attributed.rtf(from: NSRange(location: 0, length: attributed.length),
+                                                   documentAttributes: [:])), forType: .rtf)
+      #expect(checkNow().count == 1)
+    }
+
+    @Test("Declarations, attribute names, unknown tags and unclosed style bodies retain secrets")
+    func droppedHTMLWatcher() {
+      for (rule, html) in [("SECRET", "<![CDATA[SECRET]]>"), ("SECRET", "<!SECRET>"),
+                           ("SECRET", "<div SECRET>"), ("SECRET", "<p title='it's SECRET'>"),
+                           ("sk_live_X", "<sk_live_X>"), ("SECRET", "<style>SECRET")] {
+        Defaults[.ignoreRegexp] = [rule]
+        copyRichText("<p>ordinary</p>" + html, type: .html)
+        #expect(checkNow().isEmpty)
+      }
+    }
+
     private func copyRichText(_ text: String, type: NSPasteboard.PasteboardType) {
       pasteboard.declareTypes([type], owner: nil)
       pasteboard.setString(text, forType: type)
@@ -1334,16 +1466,16 @@ struct ClipboardHTMLTextTests {
   func hiddenExtraction() {
     let fragment = ClipboardHTMLText.inspect("<a href=/it's>sk_live_</a><b>abc</b> don't")
     #expect(fragment.visible == "sk_live_abc don't")
-    #expect(fragment.hidden == "/it's")
+    #expect(fragment.hidden == "href\n/it's")
     #expect(ClipboardHTMLText.extract("<style><!-- /* Word's defs */ x{} --></STYLE>secret") == "secret")
     let text = ClipboardHTMLText.inspect("<img src='data:image/png;base64,AAAA' style='secret'><a href='https://x/secret'>safe</a><!--secret--><script>if(a < b) 'secret'</SCRIPT>")
     #expect(text.visible == "safe")
-    #expect(text.hidden.contains("data:image/png;base64,"))
+    #expect(text.hidden.contains("src"))
     #expect(!text.hidden.contains("AAAA"))
     #expect(text.hidden.contains("https://x/secret"))
     #expect(text.hidden.contains("if(a < b) 'secret'"))
     #expect(text.hasContent)
-    #expect(ClipboardHTMLText.inspect("<img src='data:image/png;base64,AAAA BBBB'>").hidden == "data:image/png;base64,")
+    #expect(ClipboardHTMLText.inspect("<img src='data:image/png;base64,AAAA BBBB'>").hidden == "src")
   }
 
   @Test("BOM-less UTF-16 beyond the ASCII signature is decoded; embedded NULs fail closed")
@@ -1354,6 +1486,88 @@ struct ClipboardHTMLTextTests {
       #expect(ClipboardHTMLText.decode(data) == text)
     }
     #expect(ClipboardHTMLText.decode(Data([0, 0, 0, 0])) == nil)
+  }
+
+  static func wordPictureRTF(_ text: String, pictureBytes: Int = 512 * 1_024) -> Data {
+    // A valid one-pixel PNG with padding in each duplicated Word picture destination.
+    let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")!
+    let hex = png.map { String(format: "%02x", $0) }.joined() + String(repeating: "00", count: pictureBytes)
+    return Data((#"{\rtf1\ansi "# + text + #"{\*\shppict{\pict\pngblip "# + hex +
+                 #"}}{\nonshppict{\pict\pngblip "# + hex + "}}}").utf8)
+  }
+
+  static func tableFixture(rows: Int) -> (plain: String, html: String) {
+    let cells = (0..<rows).map { row in (0..<10).map { "Cell \(row)-\($0) notes" } }
+    let plain = cells.map { $0.joined(separator: "\t") }.joined(separator: "\r\n")
+    let html = "<html><body>\n<table class=xl>\n" + cells.map { row in
+      " <tr>\n" + row.map { "  <td class=cell style='color:red'>\($0)</td>\n" }.joined() + " </tr>\n"
+    }.joined() + "</table>\n</body></html>"
+    return (plain, html)
+  }
+
+  @Test("RTF accounting skips nested destinations and binary bytes, and fails safe on malformed input")
+  func rtfSizing() {
+    for destination in [#"\pict"#, #"\*\themedata"#, #"\*\datastore"#,
+                        #"\*\colorschememapping"#, #"\*\objdata"#, #"\*\blipuid"#] {
+      let data = Data((#"{\rtf1 safe{"# + destination + #" {nested\{text\}}\bin4 }{\}end}tail}"#).utf8)
+      #expect(IgnoreRules.rtfTextDataSize(data) == Data(#"{\rtf1 safetail}"#.utf8).count)
+    }
+    for raw in [#"{\rtf1{\pict x}"#, #"{\rtf1{\pict x}}}"#, #"{\rtf1\bin999 {}}"#,
+                #"{\rtf1{\pict\bin-1 x}}"#, #"{\rtf1{\pict\bin999999999999999999999 x}}"#,
+                #"{\rtf1{\pict\bin x}}"#] {
+      let data = Data(raw.utf8)
+      #expect(IgnoreRules.rtfTextDataSize(data) == data.count)
+    }
+    let binary = Data(#"{\rtf1 safe\bin4 }{\}tail}"#.utf8)
+    #expect(IgnoreRules.rtfTextDataSize(binary) == Data(#"{\rtf1 safetail}"#.utf8).count)
+    let picture = Self.wordPictureRTF("ordinary")
+    #expect(picture.count > IgnoreRules.rtfDataLimit)
+    #expect(IgnoreRules.rtfTextDataSize(picture) < 100)
+    let item = NSPasteboardItem()
+    item.setData(Data(repeating: 97, count: IgnoreRules.rawRTFDataLimit + 1), forType: .rtf)
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(["unmatched"], forKey: Defaults.Keys.ignoreRegexp.name)
+    let rules = IgnoreRules(preferences: defaults)
+    #expect(rules.rejects([item]))
+    #expect(rules.lastRejection == .rtfDataLimit)
+  }
+
+  @Test("Reset re-reads a repaired value and addition refuses at exactly 128 rules")
+  func resetRepairedRules() throws {
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let key = Defaults.Keys.ignoreRegexp.name
+    defaults.set("broken", forKey: key)
+    #expect(IgnoreRules.configurationIssue(in: defaults) == .unreadable)
+    defaults.set(["SECRET"], forKey: key) // Another process repairs it while confirmation is open.
+    #expect(!IgnoreRules.reset(in: defaults))
+    #expect(defaults.stringArray(forKey: key) == ["SECRET"])
+    defaults.set(Array(repeating: "valid", count: IgnoreRules.ruleLimit), forKey: key)
+    #expect(!IgnoreRules.save("another", in: defaults))
+    #expect(defaults.stringArray(forKey: key)?.count == IgnoreRules.ruleLimit)
+    #expect(IgnoreRules.save("replacement", replacingAt: 0, in: defaults))
+  }
+
+  @Test("Rich duplicates select the longest original; plain wins over rich whitespace differences")
+  func originalDeduplication() throws {
+    let suite = "org.p0deje.Maccy.tests.ignoreRules.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let key = Defaults.Keys.ignoreRegexp.name
+    defaults.set([#"\t$"#], forKey: key)
+    let item = NSPasteboardItem()
+    item.setString("<span>a b</span>", forType: .html)
+    let attributed = NSAttributedString(string: "a\tb\t")
+    item.setData(try #require(attributed.rtf(from: NSRange(location: 0, length: attributed.length),
+                                            documentAttributes: [:])), forType: .rtf)
+    #expect(IgnoreRules(preferences: defaults).rejects([item]))
+    item.setString("a b", forType: .string)
+    #expect(!IgnoreRules(preferences: defaults).rejects([item]))
+    item.setString("a\tb\t", forType: .string)
+    #expect(IgnoreRules(preferences: defaults).rejects([item]))
   }
 
   @Test("Settings distinguish unreadable, too many and invalid rules; reset and add honor ownership")

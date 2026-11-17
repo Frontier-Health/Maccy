@@ -314,13 +314,15 @@ struct StorageSettingsPane: View {
       return String(format: localized(
         "ExpiryOn",
         "Items you have not copied for %lld hours are removed (copying an item from Maccy counts). Pinned " +
-          "items are kept. Checked at launch, every few minutes and before history is shown."
+          "items are kept. Checked at launch, every few minutes and before history is shown. If the Mac's " +
+          "clock is set back by more than 10 minutes twice, a recently copied item can be removed early."
       ), Int64(hours))
     case (.hours(let hours), true):
       return String(format: localized(
         "ExpiryOnManaged",
         "Set by your administrator: items not copied for %lld hours are removed, including pinned items. " +
-          "Checked at launch, every few minutes and before history is shown."
+          "Checked at launch, every few minutes and before history is shown. If the Mac's clock is set back by " +
+          "more than 10 minutes twice, a recently copied item can be removed early."
       ), Int64(hours))
     case (.invalid, false):
       return String(format: localized(
@@ -354,9 +356,10 @@ struct StorageSettingsPane: View {
   private static var compactionNote: String {
     localized(
       "CompactionNote",
-      "After clearing history or removing expired items, Maccy asks its database to compact, in the " +
-        "background. This is not secure erasure: copies can remain on the disk, in APFS snapshots, in Time " +
-        "Machine and in other backups."
+      "After history is cleared or items are removed, Maccy rebuilds its database in the background so the " +
+        "deleted data is dropped from it: straight after clearing, otherwise at most once an hour and when " +
+        "Maccy quits or opens. This is not secure erasure: copies can remain on the disk, in APFS snapshots, " +
+        "in Time Machine and in other backups."
     )
   }
 

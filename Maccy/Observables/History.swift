@@ -110,10 +110,18 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   // When an automatic operation last failed, or nil if none is failing.
   var automaticRemovalFailedAt: Date? { failingOperations.values.max() }
 
-  // Whether launch maintenance has finished and history was loaded. Nothing
-  // reads or shows history before (popup, intents, search).
+  // Whether launch maintenance has finished (see `LaunchSequence`). Nothing
+  // reads or shows history before.
   @ObservationIgnored
-  private(set) var isReady = false
+  private(set) var isLaunched = false
+  // Whether the list was loaded from the store. False before launch and
+  // after a load that failed, until one succeeds (`loadIfNeeded`): the list
+  // is then empty, the popup shows an error with a retry instead, intents
+  // answer "not ready", and new copies are not stored, since adding one
+  // depends on the list (duplicates, the history size).
+  private(set) var isLoaded = false
+  // Whether history may be read: launched and loaded.
+  var isReady: Bool { isLaunched && isLoaded }
 
   // Where the expiry setting is read from, the clocks it is measured with,
   // and where maintenance keeps state across launches. Tests replace them.
@@ -146,32 +154,40 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @ObservationIgnored
   private var refusedItems: [HistoryItem] = []
 
-  // Compaction: due at this system uptime (nil when none is pending), when it
-  // last succeeded, how many attempts failed in a row, and the run in
-  // progress. A request made while one runs is counted by `generation`, so
-  // that run doesn't clear it.
+  // Compaction: due at this system uptime (nil when none is pending), when
+  // the last one started, how many attempts in a row failed or were
+  // interrupted, and the run in progress. A request made while one runs is
+  // counted by `generation`, so that run doesn't clear it.
   @ObservationIgnored
   private var compactionDueAt: TimeInterval?
   @ObservationIgnored
-  private var lastCompaction: TimeInterval?
+  private var lastCompactionStart: TimeInterval?
   @ObservationIgnored
   private var compactionFailures = 0
+  @ObservationIgnored
+  private var compactionInterruptions = 0
+  // Whether a removal that compacts promptly is waiting for a compaction to
+  // succeed: an interruption then doesn't back off.
+  @ObservationIgnored
+  private var promptCompactionPending = false
   @ObservationIgnored
   private var compactionGeneration = 0
   @ObservationIgnored
   private(set) var compactionTask: Task<Void, Never>?
 
   // How often maintenance (expiry, retries, compaction) runs while Maccy is
-  // running; how often at most a purge compacts the store; how long a
-  // purge is skipped at the point of access after the last one.
+  // running; how often at most a compaction starts for removals that don't
+  // compact promptly (`HistoryRemoval.compactsPromptly`); how long a purge is
+  // skipped at the point of access after the last one.
   static let expiryCheckInterval: TimeInterval = 5 * 60
-  static let expiryCompactionInterval: TimeInterval = 60 * 60
+  static let compactionInterval: TimeInterval = 60 * 60
   static let expiryAccessInterval: TimeInterval = 30
   // Retry delays after a failed compaction: doubling from the first, up to
   // the last.
   static let compactionRetryDelay: TimeInterval = 60
   static let compactionMaximumRetryDelay: TimeInterval = 60 * 60
-  // How long an interrupted compaction waits before it starts again.
+  // Delays after a compaction a save interrupted: doubling from this, up to
+  // `compactionInterval`.
   static let compactionResumeDelay: TimeInterval = 30
   // An item last copied later than this ahead of the clock was stamped before
   // the clock was set back.
@@ -187,7 +203,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     #if DEBUG
     // Tests drive launch themselves (see `beginLaunchForTesting`).
     guard !Self.isRunningUnitTests else {
-      isReady = true
+      isLaunched = true
+      isLoaded = true
       return
     }
     #endif
@@ -234,20 +251,30 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
-    guard isReady else { return }
+    guard isLaunched else { return }
     noteExportRemoval(IntentImageExports.removeLeftoversOnce(), userInitiated: false)
     enforceStoragePolicy(reloadingItems: false)
     try reloadItems()
   }
 
+  // Builds the list from the store. If the store can't be read, the list is
+  // emptied (nothing stale stays shown or readable) and history is not
+  // loaded until a later attempt succeeds.
   @MainActor
   private func reloadItems() throws {
-    let results = try Storage.shared.allItems()
+    let results: [HistoryItem]
+    do {
+      results = try Storage.shared.allItems()
+    } catch {
+      unloadItems()
+      throw error
+    }
     let decorators = sorter.sort(results).map { HistoryItemDecorator($0) }
     pinManager.load(from: decorators)
     allUnpinnedItems = decorators.filter(\.isUnpinned)
     filteredPinnedItems = allPinnedItems
     filteredUnpinnedItems = allUnpinnedItems
+    isLoaded = true
 
     limitHistorySize(to: HistorySize.current)
 
@@ -256,6 +283,38 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     Task {
       AppState.shared.popup.needsResize = true
     }
+  }
+
+  @MainActor
+  private func unloadItems() {
+    isLoaded = false
+    pinManager.load(from: [])
+    allUnpinnedItems = []
+    filteredPinnedItems = []
+    filteredUnpinnedItems = []
+    updateShortcuts()
+  }
+
+  // Loads history if launch has finished and the last load failed: when the
+  // popup opens (and from its retry button), before an intent or a new copy
+  // uses it, and on every maintenance tick. A failure is logged; the popup
+  // shows it. Returns whether history is loaded.
+  @MainActor
+  @discardableResult
+  func loadIfNeeded() -> Bool {
+    guard isLaunched else {
+      return false
+    }
+    guard !isLoaded else {
+      return true
+    }
+    do {
+      try reloadItems()
+      logger.notice("Loaded history after an earlier failure")
+    } catch {
+      logger.error("Could not load history: \(Notifier.redacted(error))")
+    }
+    return isLoaded
   }
 
   // A new attempt to apply the storage setting: after any change of the
@@ -380,6 +439,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   func insertIntoStorage(_ item: HistoryItem) -> Bool {
     let storage = Storage.shared
     let context = storage.context
+    // Adding a copy depends on the loaded list (duplicates, the history
+    // size), so none is stored while history can't be loaded.
+    guard loadIfNeeded() else {
+      logger.warning("History is not loaded; a new copy was not saved")
+      if context.insertedModelsArray.contains(where: { ($0 as AnyObject) === item }) {
+        deleteFromStorage(item)
+        context.processPendingChanges()
+      }
+      return false
+    }
     let allowList = StoragePolicy.current.allowList
     let changed = allowList.map { storage.sanitize(item, to: $0) } ?? false
     guard let allowList,
@@ -545,8 +614,12 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   }
 
   // Clears unpinned items when Maccy quits with "Clear history on quit" on.
-  // With `alerting` off a failure is only logged: the quit dialog tells the
-  // user instead (see `QuitClearDecision`).
+  // With `alerting` off nothing it does opens a dialog: a failed clear is
+  // only logged (the quit dialog tells the user instead, see
+  // `QuitClearDecision`), an export file left behind is logged, kept for
+  // retrying and listed in the settings, and the compaction it asks for runs
+  // in the background or at quit, whose failures are never shown in a
+  // dialog.
   @MainActor
   @discardableResult
   func clearOnQuit(alerting: Bool = true) -> Bool {
@@ -570,9 +643,6 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       cleared = false
     }
 
-    if cleared {
-      requestCompaction(after: removal)
-    }
     Clipboard.shared.clear()
     AppState.shared.popup.close()
     return cleared
@@ -600,7 +670,6 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       pinManager.removeAll()
       sessionLog.removeAll()
       Notifier.removeAllDelivered()
-      requestCompaction(after: .clearAll)
     }
     Clipboard.shared.clear()
     AppState.shared.popup.close()
@@ -663,7 +732,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     noteExportRemoval(
       !IntentImageExports.hasPendingRemovals,
       newFailure: !IntentImageExports.pendingRemovals.isSubset(of: pendingBefore),
-      userInitiated: removal.alertsEveryTime && alerting
+      userInitiated: removal.alertsEveryTime,
+      alerting: alerting
     )
 
     for decorator in decorators {
@@ -678,6 +748,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     if !items.isEmpty {
       logger.info("Removed \(items.count) history items (\(removal.rawValue))")
     }
+    if !items.isEmpty || includingOrphanedContents {
+      requestCompaction(after: removal)
+    }
     updateUnpinnedShortcuts()
     Task {
       AppState.shared.popup.needsResize = true
@@ -687,7 +760,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   // Logs the failure by domain and code only, records it, and tells the user:
   // every time for a removal they asked for, once per run of failures of the
-  // same operation for an automatic one.
+  // same operation for an automatic one. With `alerting` off it is only
+  // logged and recorded.
   @MainActor
   private func reportRemovalFailure(_ removal: HistoryRemoval, _ error: any Error, alerting: Bool = true) {
     logger.error("""
@@ -695,7 +769,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       Nothing was removed; history is unchanged.
       """)
     if let operation = removal.maintenanceOperation {
-      recordFailure(operation, showing: .removal(removal), error: error)
+      recordFailure(operation, showing: alerting ? .removal(removal) : nil, error: error)
     } else if alerting {
       present([.removal(removal)], error: error)
     }
@@ -705,9 +779,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   // left is kept for retrying (`IntentImageExports.pendingRemovals`); the
   // user is told plainly that history was deleted but a file remains: each
   // time a removal they asked for leaves a new file behind, and otherwise once
-  // per run of failures.
+  // per run of failures. With `alerting` off (the clear run while quitting,
+  // which must not open a dialog) it is only logged and recorded, and an
+  // alert is still due for the next failure of the run.
   @MainActor
-  private func noteExportRemoval(_ allRemoved: Bool, newFailure: Bool = false, userInitiated: Bool) {
+  private func noteExportRemoval(
+    _ allRemoved: Bool,
+    newFailure: Bool = false,
+    userInitiated: Bool,
+    alerting: Bool = true
+  ) {
     guard !allRemoved else {
       resolve(.exportRemoval)
       return
@@ -716,7 +797,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       \(IntentImageExports.pendingRemovals.count) exported image files could not be deleted. \
       Keeping them for retrying.
       """)
-    if userInitiated && newFailure {
+    if !alerting {
+      failingOperations[.exportRemoval] = now()
+    } else if userInitiated && newFailure {
       failingOperations[.exportRemoval] = now()
       alertedOperations.insert(.exportRemoval)
       present([.exportRemoval], error: nil)
@@ -756,23 +839,36 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   // MARK: Compaction
   //
-  // See `Storage.compact()`: not secure erasure. Every removal that clears
-  // (clear, clear all, clear on quit, clear at launch) asks for compaction
-  // straight away; a purge asks for it at most once per
-  // `expiryCompactionInterval`. A request stays pending until a compaction
-  // succeeds: the pending flag is also kept in `maintenanceState`, so one
-  // still pending at quit runs at the next launch. A failure is logged,
-  // listed in the settings, and retried by maintenance after a doubling delay;
-  // history itself was already removed.
+  // See `Storage.compact()`: a full VACUUM, not secure erasure. Its cost
+  // follows the size of the store (about 13 s for 1 GB), so:
+  // - a removal that clears (clear, clear all, clear on quit, clear at
+  //   launch) asks for it straight away: what is left is small;
+  // - any other removal (delete, trim, expiry, a refused copy) asks for it at
+  //   most once per `compactionInterval` after the last one started;
+  // - one still pending runs at quit (for a short time, see
+  //   `compactBeforeQuit`) and at launch, before capture starts (see
+  //   `afterLaunchCompaction`).
+  // A request stays pending until a compaction succeeds: the pending flag is
+  // also kept in `maintenanceState`, so one still pending at quit runs at the
+  // next launch. A save interrupts a compaction in progress; it is started
+  // again after `compactionResumeDelay`, doubling with each interruption in a
+  // row up to `compactionInterval` (not doubling while a clear waits for it).
+  // Copies can interrupt it for as long as Maccy runs, but not the one at
+  // launch, which runs before capture starts.
+  // A failure is logged, listed in the settings, and retried by maintenance
+  // after a doubling delay; history itself was already removed.
 
   @MainActor
   private func requestCompaction(after removal: HistoryRemoval) {
     let current = uptime()
     var due = current
-    if removal == .expiry, let lastCompaction {
-      due = max(current, lastCompaction + Self.expiryCompactionInterval)
+    if !removal.compactsPromptly, let lastCompactionStart {
+      due = max(current, lastCompactionStart + Self.compactionInterval)
     }
     compactionDueAt = min(compactionDueAt ?? due, due)
+    if removal.compactsPromptly {
+      promptCompactionPending = true
+    }
     compactionGeneration += 1
     maintenanceState.set(true, forKey: Self.compactionPendingKey)
     compactIfDue()
@@ -789,6 +885,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     }
     let storage = Storage.shared
     let generation = compactionGeneration
+    lastCompactionStart = uptime()
     compactionTask = Task { [self] in
       let result: Result<Void, any Error>
       do {
@@ -799,6 +896,23 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       }
       compactionTask = nil
       compactionFinished(result, generation: generation, storage: storage)
+    }
+  }
+
+  // At launch: runs `body` once a compaction left pending by the last session
+  // (or asked for by launch maintenance) has finished, or straight away if
+  // there is none. Capture starts here, so copies can't interrupt it; a save
+  // for another reason can, and then it is retried as usual.
+  @MainActor
+  func afterLaunchCompaction(_ body: @escaping @MainActor () -> Void) {
+    compactIfDue()
+    guard let compactionTask else {
+      body()
+      return
+    }
+    Task {
+      await compactionTask.value
+      body()
     }
   }
 
@@ -813,8 +927,14 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func compactionFinished(_ result: Result<Void, any Error>, generation: Int, storage: Storage) {
+    // A compaction of a store that has since been replaced (tests only):
+    // its result says nothing about the current one.
+    guard storage === Storage.shared else {
+      compactIfDue()
+      return
+    }
     // Changes made while autosave was off for the compaction.
-    if storage === Storage.shared, storage.context.hasChanges {
+    if storage.context.hasChanges {
       do {
         try storage.save()
       } catch {
@@ -825,17 +945,24 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     switch result {
     case .success:
       logger.info("Compacted the history database")
-      lastCompaction = uptime()
       compactionFailures = 0
+      compactionInterruptions = 0
       resolve(.compaction)
       if generation == compactionGeneration {
         compactionDueAt = nil
+        promptCompactionPending = false
         maintenanceState.set(false, forKey: Self.compactionPendingKey)
       }
     case .failure(let error as StorageCompactionError) where error.isInterrupted:
-      // A save stopped it; not a failure. Started again shortly.
-      logger.info("Compaction was interrupted by a save; it runs again later")
-      compactionDueAt = uptime() + Self.compactionResumeDelay
+      // A save stopped it; not a failure. Started again later: soon after a
+      // clear, otherwise backing off.
+      compactionInterruptions += 1
+      let delay = promptCompactionPending ? Self.compactionResumeDelay : min(
+        Self.compactionResumeDelay * pow(2, Double(compactionInterruptions - 1)),
+        Self.compactionInterval
+      )
+      compactionDueAt = uptime() + delay
+      logger.info("Compaction was interrupted by a save; it runs again in \(Int(delay)) s")
     case .failure(let error):
       compactionFailures += 1
       let delay = min(
@@ -854,8 +981,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   }
 
   // At quit: runs a pending compaction on this thread, giving up after
-  // `timeLimit` (SQLite rolls an unfinished vacuum back). If it doesn't
-  // finish, it stays pending for the next launch.
+  // `timeLimit` (SQLite rolls an unfinished one back). If it doesn't finish
+  // (a store over roughly 0.4 GB takes longer than 5 s), it stays pending and
+  // runs at the next launch, before capture starts.
   @MainActor
   func compactBeforeQuit(timeLimit: TimeInterval) {
     guard compactionDueAt != nil else {
@@ -864,6 +992,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     do {
       try Storage.shared.compactNow(deadline: ProcessInfo.processInfo.systemUptime + timeLimit)
       compactionDueAt = nil
+      promptCompactionPending = false
       maintenanceState.set(false, forKey: Self.compactionPendingKey)
       logger.info("Compacted the history database before quitting")
     } catch {
@@ -904,8 +1033,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     limitStoredHistorySize()
   }
 
-  // Launch step 3: builds the list. A failure is reported (with the others
-  // collected at launch), not swallowed; opening the window tries again.
+  // Launch step 3: builds the list, and marks launch maintenance finished
+  // either way. A failed load is reported (with the others collected at
+  // launch), not swallowed; history then stays not loaded (see `isLoaded`)
+  // until `loadIfNeeded` succeeds.
   @MainActor
   func finishLaunch() {
     beginCollectingFailures()
@@ -915,7 +1046,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       logger.error("Could not load history: \(Notifier.redacted(error))")
       present([.load], error: error)
     }
-    isReady = true
+    isLaunched = true
   }
 
   // Launch step 7: shows every failure collected at launch, in one alert.
@@ -971,7 +1102,6 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     if remove(items, includingOrphanedContents: true, revokingAllExports: true, as: .clearOnLaunch) {
       launchClearPending = false
       launchClearItems = nil
-      requestCompaction(after: .clearOnLaunch)
     }
   }
 
@@ -984,19 +1114,23 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     deferredFailures = nil
     deferredErrorCode = nil
     compactionDueAt = nil
-    lastCompaction = nil
+    lastCompactionStart = nil
     compactionFailures = 0
+    compactionInterruptions = 0
+    promptCompactionPending = false
     lastExpiryRun = nil
     launchClearItems = nil
     launchClearPending = false
     launchTime = nil
     refusedItems = []
-    isReady = true
+    isLaunched = true
+    isLoaded = true
   }
 
   // Tests replay a launch: history is not ready until `finishLaunch`.
   func beginLaunchForTesting() {
-    isReady = false
+    isLaunched = false
+    isLoaded = false
   }
 
   var isExpiryScheduled: Bool { maintenanceTimer != nil || !maintenanceObservers.isEmpty }
@@ -1056,10 +1190,13 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   // deleted, and starts a compaction that is due.
   @MainActor
   func runMaintenance() {
-    guard isReady else { return }
+    guard isLaunched else { return }
+    loadIfNeeded()
     retryLaunchClear()
     retryRefusedRemovals()
-    if failingOperations[.trim] != nil {
+    if !isLoaded {
+      limitStoredHistorySize()
+    } else if failingOperations[.trim] != nil {
       limitHistorySize(to: HistorySize.current)
     }
     runExpiry()
@@ -1069,12 +1206,11 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     compactIfDue()
   }
 
-  // Purges expired items, and asks for compaction if that removed something.
+  // Purges expired items (which asks for compaction if that removed
+  // something).
   @MainActor
   func runExpiry() {
-    if let removed = purgeExpiredItems(), removed > 0 {
-      requestCompaction(after: .expiry)
-    }
+    purgeExpiredItems()
   }
 
   // Before history is shown or read (popup, Get and Select intents): purges
@@ -1093,14 +1229,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     runExpiry()
   }
 
-  // Whether history may be shown now: launch has finished. Purges expired
-  // items first.
+  // Whether the popup may open now: launch has finished. Purges expired
+  // items first, and tries loading again if the last load failed (the popup
+  // then shows an error with a retry, see `isLoaded`).
   @MainActor
   func prepareForDisplay() -> Bool {
-    guard isReady else {
+    guard isLaunched else {
       return false
     }
     runExpiryIfDue()
+    loadIfNeeded()
     return true
   }
 

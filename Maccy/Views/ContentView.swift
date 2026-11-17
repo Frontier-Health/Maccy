@@ -16,44 +16,49 @@ struct ContentView: View {
         VisualEffectView()
       }
 
-      KeyHandlingView(searchQuery: $appState.history.searchQuery, searchFocused: $searchFocused) {
-        VStack(spacing: 0) {
-          SlideoutView(controller: appState.preview) {
-            HeaderView(
-              controller: appState.preview,
-              searchFocused: $searchFocused
-            )
-
-            VStack(alignment: .leading, spacing: 0) {
-              HistoryListView(
-                searchQuery: $appState.history.searchQuery,
+      if !appState.history.isLoaded {
+        // No list, so nothing stale is shown, until history loads.
+        HistoryLoadFailedView { _ = appState.history.loadIfNeeded() }
+      } else {
+        KeyHandlingView(searchQuery: $appState.history.searchQuery, searchFocused: $searchFocused) {
+          VStack(spacing: 0) {
+            SlideoutView(controller: appState.preview) {
+              HeaderView(
+                controller: appState.preview,
                 searchFocused: $searchFocused
               )
 
-              FooterView(footer: appState.footer)
+              VStack(alignment: .leading, spacing: 0) {
+                HistoryListView(
+                  searchQuery: $appState.history.searchQuery,
+                  searchFocused: $searchFocused
+                )
+
+                FooterView(footer: appState.footer)
+              }
+              .animation(.default.speed(3), value: appState.history.items)
+              .animation(
+                .default.speed(3),
+                value: appState.history.pasteStack?.id
+              )
+              .padding(.horizontal, Popup.horizontalPadding)
+              .onAppear {
+                searchFocused = true
+              }
+              .onMouseMove {
+                appState.navigator.isKeyboardNavigating = false
+              }
+            } slideout: {
+              SlideoutContentView()
             }
-            .animation(.default.speed(3), value: appState.history.items)
-            .animation(
-              .default.speed(3),
-              value: appState.history.pasteStack?.id
-            )
-            .padding(.horizontal, Popup.horizontalPadding)
-            .onAppear {
-              searchFocused = true
-            }
-            .onMouseMove {
-              appState.navigator.isKeyboardNavigating = false
-            }
-          } slideout: {
-            SlideoutContentView()
+            .frame(minHeight: 0)
+            .layoutPriority(1)
           }
-          .frame(minHeight: 0)
-          .layoutPriority(1)
         }
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .task {
-        try? await appState.history.load()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task {
+          try? await appState.history.load()
+        }
       }
     }
     .animation(.easeInOut(duration: 0.2), value: appState.searchVisible)
@@ -84,6 +89,25 @@ struct ContentView: View {
         scenePhase = .background
       }
     }
+  }
+}
+
+// Shown in the popup instead of the list while history can't be loaded.
+private struct HistoryLoadFailedView: View {
+  let retry: () -> Void
+
+  var body: some View {
+    VStack(spacing: 8) {
+      Text(HistoryFailure.load.title)
+        .font(.headline)
+      Text(HistoryFailure.load.message)
+        .font(.callout)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+      Button(HistoryFailure.loadRetryButton, action: retry)
+    }
+    .padding()
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 }
 

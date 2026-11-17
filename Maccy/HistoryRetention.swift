@@ -145,6 +145,16 @@ nonisolated enum HistoryRemoval: String, Sendable {
   // operation succeeds), and is logged and listed in the Storage settings.
   var alertsEveryTime: Bool { maintenanceOperation == nil }
 
+  // Whether the store is compacted straight after it (see
+  // `History.requestCompaction`). Clearing leaves a small store, which is
+  // quick to rebuild; after other removals compaction is coalesced.
+  var compactsPromptly: Bool {
+    switch self {
+    case .clear, .clearAll, .clearOnQuit, .clearOnLaunch: true
+    case .delete, .trim, .expiry, .refusedByStoragePolicy: false
+    }
+  }
+
   var maintenanceOperation: MaintenanceOperation? {
     switch self {
     case .delete, .clear, .clearAll, .clearOnQuit: nil
@@ -277,6 +287,9 @@ nonisolated enum HistoryFailure: Equatable, Sendable {
     NSLocalizedString(key, tableName: "StorageSettings", value: value, comment: "")
   }
 
+  // The popup's button that tries loading history again.
+  static var loadRetryButton: String { localized("LoadRetry", "Try Again") }
+
   var title: String {
     switch self {
     case .removal(let removal):
@@ -301,8 +314,9 @@ nonisolated enum HistoryFailure: Equatable, Sendable {
     case .load:
       Self.localized(
         "LoadFailedMessage",
-        "Maccy could not read its history database, so history is not shown. Stored items have not been " +
-          "removed. Maccy will try again when you open it. If this keeps happening, quit and reopen Maccy."
+        "Maccy could not read its history database, so history is not shown and new copies are not saved. " +
+          "Stored items have not been removed. Maccy tries again every few minutes and when you open it. " +
+          "If this keeps happening, quit and reopen Maccy."
       )
     }
   }
@@ -388,6 +402,51 @@ enum QuitClearDecision {
   }
   static var quitAnywayButton: String { localized("QuitAnyway", "Quit Anyway") }
   static var cancelButton: String { localized("QuitCancel", "Cancel") }
+}
+
+// Whether a quit request comes from the session ending (log out, restart,
+// shut down), when Maccy must not hold the session open with a dialog.
+//
+// The quit Apple event of a session end says so (`kAEQuitReason`). As a
+// fallback, `NSWorkspace.willPowerOffNotification` is remembered, but a
+// session end can be cancelled (by the user, or by another app refusing to
+// quit), and Maccy keeps running. So the notice is forgotten when a quit is
+// cancelled or Maccy becomes active again, and it never applies to a quit
+// asked for in Maccy itself (no Apple event): the user is there to answer.
+@MainActor
+struct SessionEndState {
+  enum QuitRequest: Equatable {
+    // A quit Apple event; `sessionEnding` if its reason is a session end.
+    case appleEvent(sessionEnding: Bool)
+    // From Maccy's own interface.
+    case inApp
+  }
+
+  private(set) var powerOffNoticed = false
+
+  mutating func noticePowerOff() {
+    powerOffNoticed = true
+  }
+
+  // A quit was cancelled, or Maccy became active again: the session goes on.
+  mutating func sessionContinues() {
+    powerOffNoticed = false
+  }
+
+  // After answering a quit request: one that was cancelled means the session
+  // goes on.
+  mutating func quitAnswered(_ reply: NSApplication.TerminateReply) {
+    if reply == .terminateCancel {
+      sessionContinues()
+    }
+  }
+
+  func isSessionEnding(_ request: QuitRequest) -> Bool {
+    switch request {
+    case .appleEvent(let sessionEnding): sessionEnding || powerOffNoticed
+    case .inApp: false
+    }
+  }
 }
 
 // The launch, in order. Nothing that reads or shows history runs before the

@@ -75,6 +75,7 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
     AppState.shared.history.runExpiryIfDue()
     var item: HistoryItem?
     if selected {
+      try HistoryIntentAccess.requireLoaded()
       item = AppState.shared.navigator.selection.first?.item
     } else {
       item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items).item

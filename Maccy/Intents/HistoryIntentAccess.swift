@@ -17,20 +17,31 @@ enum HistoryIntentAccess {
   // history to be ready before it is refused. Tests shorten it.
   static var readinessTimeout: Duration = .seconds(10)
 
-  // Waits until launch maintenance has finished and history is loaded (see
-  // `LaunchSequence`), or throws `notReady`. History is never read before.
+  // Waits until launch maintenance has finished (see `LaunchSequence`), or
+  // throws `notReady`. History is never read before. If history could not be
+  // loaded, it is tried once more; if that fails too, `notReady` at once.
   static func waitUntilReady() async throws {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: readinessTimeout)
-    while !History.shared.isReady {
+    while !History.shared.isLaunched {
       guard clock.now < deadline else {
         throw AppIntentError.notReady
       }
       try await Task.sleep(for: .milliseconds(100))
     }
+    try requireLoaded()
+  }
+
+  // Throws `notReady` unless history is loaded (tried again if it isn't), so
+  // an intent never answers from a list that wasn't loaded.
+  static func requireLoaded() throws {
+    guard History.shared.loadIfNeeded() else {
+      throw AppIntentError.notReady
+    }
   }
 
   static func item<Items: RandomAccessCollection>(number: Int, in items: Items) throws -> Items.Element {
+    try requireLoaded()
     guard number >= 1, number <= items.count else {
       throw AppIntentError.notFound
     }
@@ -44,9 +55,11 @@ enum HistoryIntentAccess {
 /// once history is full) does not pull files out from under a shortcut that is still using another
 /// item's export. Clearing history removes all of them.
 ///
-/// A path is forgotten only once its file is gone (a file already absent counts as gone). A file
-/// that could not be deleted is kept in `pendingRemovals` and tried again by every later removal,
-/// clear, the launch sweep and the periodic maintenance. Every removal returns whether no export is
+/// A path is forgotten only after its file was deleted, or after an error that shows it is absent:
+/// "no such file" from the delete itself, or from `lstat`. Any other error (no permission on the
+/// file or on a parent directory, busy, I/O) proves nothing about the file, so the path is kept in
+/// `pendingRemovals` and tried again by every later removal, clear, the launch sweep and the
+/// periodic maintenance. Every removal returns whether no export is
 /// left behind, so History can tell the user.
 @MainActor
 enum IntentImageExports {
@@ -118,8 +131,8 @@ enum IntentImageExports {
       let leftovers = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
       pendingRemovals.formUnion(leftovers)
     } catch {
-      // A directory that can't be listed is removed as a whole; one that doesn't exist is fine.
-      if fileManager.fileExists(atPath: directory.path) {
+      // A directory that can't be listed is removed as a whole; one shown to be absent is fine.
+      if !isAbsent(directory) {
         pendingRemovals.insert(directory)
       }
     }
@@ -158,18 +171,31 @@ enum IntentImageExports {
     return removeAll()
   }
 
-  /// Whether the file is gone: deleted now, or already absent.
+  /// Whether the file is gone: deleted now, or shown to be absent.
   private static func removeFile(_ file: URL) -> Bool {
-    let fileManager = FileManager.default
     do {
-      try fileManager.removeItem(at: file)
+      try FileManager.default.removeItem(at: file)
       return true
     } catch {
-      return !fileManager.fileExists(atPath: file.path) && !isSymbolicLink(file)
+      return reportsNoSuchFile(error) || isAbsent(file)
     }
   }
 
-  private static func isSymbolicLink(_ file: URL) -> Bool {
-    (try? FileManager.default.attributesOfItem(atPath: file.path)[.type] as? FileAttributeType) == .typeSymbolicLink
+  /// Whether a failed delete says the file does not exist. `fileExists(atPath:)` can't tell: it is
+  /// also false when a parent directory denies search permission.
+  static func reportsNoSuchFile(_ error: any Error) -> Bool {
+    let error = error as NSError
+    if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError, underlying.domain == NSPOSIXErrorDomain {
+      return underlying.code == Int(ENOENT)
+    }
+    return (error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError) ||
+      (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))
+  }
+
+  /// Whether `lstat` says nothing is at `url` (not even a symbolic link). Any other outcome,
+  /// including "permission denied", counts as present.
+  static func isAbsent(_ url: URL) -> Bool {
+    var info = stat()
+    return lstat(url.path, &info) != 0 && errno == ENOENT
   }
 }

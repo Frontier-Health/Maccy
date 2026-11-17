@@ -41,27 +41,7 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
   }
 
   func perform() async throws -> some IntentResult & ReturnsValue<HistoryItemAppEntity> {
-    let (contents, imageURL) = try await MainActor.run { () -> (GetItemContents, URL?) in
-      try HistoryIntentAccess.requireEnabled()
-      // History reflects the current storage policy before anything is read.
-      AppState.shared.history.enforceStoragePolicy()
-      var item: HistoryItem?
-      if selected {
-        item = AppState.shared.navigator.selection.first?.item
-      } else {
-        item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items).item
-      }
-
-      guard let item else {
-        throw AppIntentError.notFound
-      }
-
-      let contents = Self.contents(of: item, readableBy: StoragePolicy.currentReadAllowList)
-      // Stored images can be JPEG, HEIC or TIFF. The exported IntentFile promises PNG.
-      let pngData = contents.image.flatMap { NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:]) }
-      let imageURL = try pngData.map { try IntentImageExports.write($0, for: item) }
-      return (contents, imageURL)
-    }
+    let (contents, imageURL) = try await Self.read(selected: selected, number: number)
 
     let intentItem = HistoryItemAppEntity()
     intentItem.text = contents.text
@@ -83,6 +63,35 @@ struct Get: AppIntent, CustomIntentMigratedAppIntent {
     }
 
     return .result(value: intentItem)
+  }
+
+  @MainActor
+  private static func read(selected: Bool, number: Int) async throws -> (GetItemContents, URL?) {
+    try HistoryIntentAccess.requireEnabled()
+    // History reflects the current storage policy before anything is read.
+    AppState.shared.history.enforceStoragePolicy()
+    var item: HistoryItem?
+    if selected {
+      item = AppState.shared.navigator.selection.first?.item
+    } else {
+      item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items).item
+    }
+
+    guard let item else {
+      throw AppIntentError.notFound
+    }
+
+    // A Universal Clipboard image file is read off the main thread first.
+    await item.loadImageIfNeeded()
+    guard !item.isDeleted else {
+      throw AppIntentError.notFound
+    }
+
+    let contents = Self.contents(of: item, readableBy: StoragePolicy.currentReadAllowList)
+    // Stored images can be JPEG, HEIC or TIFF. The exported IntentFile promises PNG.
+    let pngData = contents.image.flatMap { NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:]) }
+    let imageURL = try pngData.map { try IntentImageExports.write($0, for: item) }
+    return (contents, imageURL)
   }
 
   // What the intent hands out: only representations of exactly the types that

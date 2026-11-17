@@ -44,7 +44,14 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
     return url.deletingPathExtension().lastPathComponent
   }
 
-  var hasImage: Bool { item.image != nil }
+  // A Universal Clipboard image counts before its file is read (in the
+  // background); if the read fails the preview shows the broken-image symbol.
+  var hasImage: Bool {
+    if case .universalClipboardFile = item.imageSource(readableBy: StoragePolicy.currentReadAllowList) {
+      return true
+    }
+    return item.image != nil
+  }
   var hasFileURLs: Bool { !item.fileURLs.isEmpty }
   var hasPlainText: Bool { item.text != nil }
   var hasRichText: Bool { item.rtf != nil || item.html != nil }
@@ -58,9 +65,8 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
   var thumbnailImage: NSImage?
   var applicationImage: ApplicationImage
 
-  @ObservationIgnored
-  private(set) lazy var imageSize: String? = item.imageData.map {
-    ByteCountFormatter.string(fromByteCount: Int64($0.count), countStyle: .file)
+  var imageSize: String? {
+    item.imageData.map { ByteCountFormatter.string(fromByteCount: Int64($0.count), countStyle: .file) }
   }
 
   // 10k characters seems to be more than enough on large displays
@@ -131,7 +137,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
 
   @MainActor
   func ensureThumbnailImage() {
-    guard item.image != nil else {
+    guard hasImage else {
       return
     }
     guard thumbnailImage == nil else {
@@ -141,13 +147,14 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
       return
     }
     thumbnailImageGenerationTask = Task { [weak self] in
+      await self?.item.loadImageIfNeeded()
       self?.generateThumbnailImage()
     }
   }
 
   @MainActor
   func ensurePreviewImage() {
-    guard item.image != nil else {
+    guard hasImage else {
       return
     }
     guard previewImage == nil else {
@@ -157,6 +164,7 @@ class HistoryItemDecorator: Identifiable, Hashable, HasVisibility {
       return
     }
     previewImageGenerationTask = Task { [weak self] in
+      await self?.item.loadImageIfNeeded()
       self?.generatePreviewImage()
     }
   }

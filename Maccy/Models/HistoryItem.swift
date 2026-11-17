@@ -97,6 +97,9 @@ class HistoryItem {
   // Where the cached image was decoded from, so a cache made from a
   // representation that has since been removed or disallowed is never used.
   @Transient private var cachedDecodedImageSource: HistoryItemImageSource?
+  // The Universal Clipboard image file, once `loadImageIfNeeded()` has read
+  // it off the main thread (nil data: it failed a check).
+  @Transient private var universalClipboardFileData: UniversalClipboardFileData?
 
   init(contents: [HistoryItemContent] = []) {
     self.firstCopiedAt = firstCopiedAt
@@ -553,8 +556,26 @@ class HistoryItem {
     case .content(_, let id):
       return contents.first { ObjectIdentifier($0) == id }?.value
     case .universalClipboardFile(let url):
-      return try? Data(contentsOf: url)
+      // Never read here, on the caller's (main) thread: only what
+      // `loadImageIfNeeded()` read in the background.
+      guard let loaded = universalClipboardFileData, loaded.url == url else {
+        return nil
+      }
+      return loaded.data
     }
+  }
+
+  // Reads a Universal Clipboard image file off the main thread, once per file,
+  // so `image` and `imageData` can show it. Does nothing for other images.
+  @MainActor
+  func loadImageIfNeeded() async {
+    guard case .universalClipboardFile(let url) = imageSource(readableBy: StoragePolicy.currentReadAllowList),
+          universalClipboardFileData?.url != url else {
+      return
+    }
+
+    let data = await UniversalClipboardFile.load(url)
+    universalClipboardFileData = UniversalClipboardFileData(url: url, data: data)
   }
 
   var image: NSImage? {
@@ -655,7 +676,8 @@ class HistoryItem {
     guard universalClipboard,
           StorageType.images.types.allSatisfy(allowList.allows),
           let url = fileURLs(readableBy: allowList).first,
-          url.pathExtension == "jpeg" else {
+          url.pathExtension == "jpeg",
+          UniversalClipboardFile.isInAllowedLocation(url) else {
       return nil
     }
 
@@ -705,7 +727,9 @@ class HistoryItem {
   }
 
   nonisolated private static func performTextRecognition(imageData: Data?, fileURL: URL?) -> String? {
-    guard let data = imageData ?? fileURL.flatMap({ try? Data(contentsOf: $0) }) else {
+    // A Universal Clipboard file is read here, on the recognition queue, with
+    // every check `UniversalClipboardFile.read` makes.
+    guard let data = imageData ?? fileURL.flatMap({ try? UniversalClipboardFile.read($0) }) else {
       return nil
     }
 
@@ -729,6 +753,11 @@ class HistoryItem {
       .compactMap { $0.topCandidates(1).first?.string }
       .joined(separator: "\n")
   }
+}
+
+nonisolated struct UniversalClipboardFileData {
+  let url: URL
+  let data: Data?
 }
 
 // Where an item's image comes from: a stored representation, or the file a

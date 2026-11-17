@@ -114,8 +114,18 @@ extension SharedStateTests {
     }
 
     @Test("Image from Universal Clipboard")
-    func imageFromUniversalClipboard() throws {
-      let url = try #require(Bundle(for: BundleToken.self).url(forResource: "guy", withExtension: "jpeg"))
+    func imageFromUniversalClipboard() async throws {
+      let fixture = try #require(Bundle(for: BundleToken.self).url(forResource: "guy", withExtension: "jpeg"))
+      // Read only from where macOS stages Universal Clipboard files.
+      let staging = FileManager.default.temporaryDirectory.appending(path: "uc-staging-\(UUID().uuidString)")
+      try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+      UniversalClipboardFile.allowedDirectoriesForTesting = [staging.path]
+      defer {
+        UniversalClipboardFile.allowedDirectoriesForTesting = nil
+        try? FileManager.default.removeItem(at: staging)
+      }
+      let url = staging.appending(path: "guy.jpeg")
+      try FileManager.default.copyItem(at: fixture, to: url)
       let fileURLContent = HistoryItemContent(
         type: NSPasteboard.PasteboardType.fileURL.rawValue,
         value: url.dataRepresentation
@@ -127,6 +137,9 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = [fileURLContent, universalClipboardContent]
+      // The file is read in the background, not by `image`.
+      #expect(item.image == nil)
+      await item.loadImageIfNeeded()
       let image = try #require(item.image)
       let expected = try #require(NSImage(data: try Data(contentsOf: url)))
       #expect(image.tiffRepresentation == expected.tiffRepresentation)

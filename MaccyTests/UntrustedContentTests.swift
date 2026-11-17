@@ -43,6 +43,9 @@ extension SharedStateTests {
       Defaults[.ignoreAllAppsExceptListed] = savedIgnoreAllAppsExceptListed
       Defaults[.ignoredApps] = savedIgnoredApps
       Defaults[.ignoredPasteboardTypes] = savedIgnoredPasteboardTypes
+      UniversalClipboardFile.allowedDirectoriesForTesting = nil
+      UniversalClipboardFile.maximumBytesForTesting = nil
+      UniversalClipboardFile.readObserverForTesting = nil
     }
 
     // MARK: Group 1: one value per type
@@ -154,7 +157,131 @@ extension SharedStateTests {
       #expect(item.contents.count == 1)
     }
 
+    // MARK: Group 2: the Universal Clipboard file
+
+    @Test("A Universal Clipboard image file is read only if it passes every check, and never on the main thread")
+    func universalClipboardFileChecks() async throws {
+      let files = FileManager.default
+      let root = files.temporaryDirectory.appending(path: "a7-uc-\(UUID().uuidString)")
+      let staging = root.appending(path: "items")
+      let elsewhere = root.appending(path: "elsewhere")
+      try files.createDirectory(at: staging.appending(path: "copy"), withIntermediateDirectories: true)
+      try files.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+      defer { try? files.removeItem(at: root) }
+      UniversalClipboardFile.allowedDirectoriesForTesting = [staging.path]
+      let jpeg = try jpegData()
+      UniversalClipboardFile.maximumBytesForTesting = jpeg.count
+
+      let valid = staging.appending(path: "copy/photo.jpeg")
+      try jpeg.write(to: valid)
+      let outside = elsewhere.appending(path: "photo.jpeg")
+      try jpeg.write(to: outside)
+      let directory = staging.appending(path: "folder.jpeg")
+      try files.createDirectory(at: directory, withIntermediateDirectories: true)
+      let symlink = staging.appending(path: "link.jpeg")
+      try files.createSymbolicLink(at: symlink, withDestinationURL: outside)
+      let linkedDirectory = staging.appending(path: "linked")
+      try files.createSymbolicLink(at: linkedDirectory, withDestinationURL: elsewhere)
+      let throughLinkedDirectory = linkedDirectory.appending(path: "photo.jpeg")
+      let oversized = staging.appending(path: "copy/large.jpeg")
+      try (jpeg + Data([0])).write(to: oversized)
+      let remote = try #require(URL(string: "https://example.com/photo.jpeg"))
+
+      let reads = ThreadRecorder()
+      UniversalClipboardFile.readObserverForTesting = { reads.record($0) }
+
+      // A valid file: shown as an image, but only read in the background.
+      let item = universalClipboardItem(valid)
+      #expect(HistoryItemDecorator(item).hasImage)
+      #expect(item.image == nil)
+      #expect(item.imageData == nil)
+      #expect(reads.values.isEmpty)
+      await item.loadImageIfNeeded()
+      #expect(item.imageData == jpeg)
+      #expect(item.image != nil)
+      #expect(Get.contents(of: item, readableBy: StoragePolicy.currentReadAllowList).image == jpeg)
+
+      // Paths outside the staging location are never looked up at all.
+      for url in [remote, outside] {
+        let rejected = universalClipboardItem(url)
+        #expect(rejected.imageSource(readableBy: .everything) == nil)
+        await rejected.loadImageIfNeeded()
+        #expect(rejected.imageData == nil)
+        #expect(!HistoryItemDecorator(rejected).hasImage)
+      }
+      // Inside it, but not a regular local file within the limit.
+      for url in [directory, symlink, throughLinkedDirectory, oversized] {
+        let rejected = universalClipboardItem(url)
+        await rejected.loadImageIfNeeded()
+        #expect(rejected.imageData == nil, "\(url.lastPathComponent)")
+        #expect(rejected.image == nil, "\(url.lastPathComponent)")
+      }
+      // Every read so far ran in the background.
+      #expect(reads.values.count == 5)
+      #expect(reads.values.allSatisfy { !$0 })
+
+      // Why each one is refused.
+      UniversalClipboardFile.readObserverForTesting = nil
+      #expect(throws: UniversalClipboardFile.Rejection.notFileURL) { try UniversalClipboardFile.read(remote) }
+      #expect(throws: UniversalClipboardFile.Rejection.outsideAllowedLocation) {
+        try UniversalClipboardFile.read(outside)
+      }
+      #expect(throws: UniversalClipboardFile.Rejection.notRegularFile) { try UniversalClipboardFile.read(directory) }
+      #expect(throws: UniversalClipboardFile.Rejection.notRegularFile) { try UniversalClipboardFile.read(symlink) }
+      #expect(throws: UniversalClipboardFile.Rejection.outsideAllowedLocation) {
+        try UniversalClipboardFile.read(throughLinkedDirectory)
+      }
+      #expect(throws: UniversalClipboardFile.Rejection.tooLarge) { try UniversalClipboardFile.read(oversized) }
+      #expect(throws: UniversalClipboardFile.Rejection.outsideAllowedLocation) {
+        try UniversalClipboardFile.read(staging.appending(path: "copy/../../elsewhere/photo.jpeg"))
+      }
+      #expect(try UniversalClipboardFile.read(valid) == jpeg)
+    }
+
+    @Test("Without an override, only the two known staging directories are allowed")
+    func universalClipboardStagingDirectories() {
+      let directories = UniversalClipboardFile.allowedDirectories
+      #expect(directories.count == 2)
+      #expect(directories.contains {
+        $0.hasSuffix("/Library/Group Containers/group.com.apple.coreservices.useractivityd/shared-pasteboard/items/")
+      })
+      #expect(directories.contains("/private/var/folders/*/*/T/com.apple.useractivityd/shared-pasteboard/items/"))
+      for path in [
+        "/private/var/folders/ab/cdef123/T/com.apple.useractivityd/shared-pasteboard/items/UUID/photo.jpeg",
+        "/var/folders/ab/cdef123/T/com.apple.useractivityd/shared-pasteboard/items/UUID/photo.jpeg"
+      ] {
+        #expect(UniversalClipboardFile.isInAllowedLocation(URL(fileURLWithPath: path)))
+      }
+      for path in [
+        "/Volumes/Share/photo.jpeg",
+        "/private/var/folders/ab/T/com.apple.useractivityd/shared-pasteboard/items/photo.jpeg",
+        "/private/var/folders/ab/cd/T/com.apple.useractivityd/shared-pasteboard/items",
+        "/private/var/folders/ab/cd/T/com.apple.useractivityd/shared-pasteboard/itemsX/photo.jpeg",
+        "/private/var/folders/ab/cd/T/com.apple.useractivityd/shared-pasteboard/items/../../../../x.jpeg"
+      ] {
+        #expect(!UniversalClipboardFile.isInAllowedLocation(URL(fileURLWithPath: path)), "\(path)")
+      }
+    }
+
     // MARK: Helpers
+
+    private func universalClipboardItem(_ url: URL) -> HistoryItem {
+      let item = HistoryItem()
+      Storage.shared.context.insert(item)
+      item.contents = [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.fileURL.rawValue, value: url.dataRepresentation),
+        HistoryItemContent(type: NSPasteboard.PasteboardType.universalClipboard.rawValue, value: Data())
+      ]
+      return item
+    }
+
+    private func jpegData(width: Int = 4, height: Int = 4) throws -> Data {
+      let rep = try #require(NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 3,
+        hasAlpha: false, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+      ))
+      return try #require(rep.representation(using: .jpeg, properties: [:]))
+    }
 
     // Title, list row, preview, editor, Get, formatted paste and plain paste
     // all yield `text`, and each paste writes it exactly once.
@@ -205,4 +332,16 @@ extension SharedStateTests {
       return copies
     }
   }
+}
+
+// Records, from any thread, whether each call ran on the main thread.
+final class ThreadRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recorded: [Bool] = []
+
+  func record(_ onMainThread: Bool) {
+    lock.withLock { recorded.append(onMainThread) }
+  }
+
+  var values: [Bool] { lock.withLock { recorded } }
 }

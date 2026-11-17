@@ -649,6 +649,8 @@ extension SharedStateTests {
 
     @Test("A Universal Clipboard image file is read only while every image type may be read")
     func universalClipboardImageNeedsEveryImageType() {
+      UniversalClipboardFile.allowedDirectoriesForTesting = ["/tmp"]
+      defer { UniversalClipboardFile.allowedDirectoriesForTesting = nil }
       let item = storedItem([
         .fileURL: URL(fileURLWithPath: "/tmp/photo.jpeg").dataRepresentation,
         .universalClipboard: Data()

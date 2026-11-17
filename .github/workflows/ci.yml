@@ -36,8 +36,10 @@ jobs:
       - name: Test the release identity guard
         run: sh scripts/test-check-release-identity.sh
 
-      - name: Check rich-text importers
-        run: python3 tools/check-rich-text-importers.py
+      - name: Check rich-text importers and image decoders
+        run: |
+          python3 tools/check-rich-text-importers.py --self-test
+          python3 tools/check-rich-text-importers.py
 
       - name: Resolve Swift packages
         run: |

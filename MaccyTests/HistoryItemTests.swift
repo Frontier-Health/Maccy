@@ -137,12 +137,15 @@ extension SharedStateTests {
       let item = HistoryItem()
       Storage.shared.context.insert(item)
       item.contents = [fileURLContent, universalClipboardContent]
-      // The file is read in the background, not by `image`.
-      #expect(item.image == nil)
+      // The file is read in the background, not on first use.
+      #expect(item.imagePixelSize == nil)
       await item.loadImageIfNeeded()
-      let image = try #require(item.image)
-      let expected = try #require(NSImage(data: try Data(contentsOf: url)))
-      #expect(image.tiffRepresentation == expected.tiffRepresentation)
+      #expect(item.imageData == (try Data(contentsOf: url)))
+      let decoded = try #require(await item.decodedImage(for: .fullSize))
+      let expected = try #require(NSBitmapImageRep(data: try Data(contentsOf: url)))
+      // Oriented as EXIF says, so width and height may swap.
+      #expect(Set([decoded.cgImage.width, decoded.cgImage.height]) == Set([expected.pixelsWide, expected.pixelsHigh]))
+      #expect(item.imagePixelSize == NSSize(width: expected.pixelsWide, height: expected.pixelsHigh))
     }
 
     @Test("File from Universal Clipboard")

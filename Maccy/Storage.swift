@@ -40,6 +40,11 @@ class Storage {
 
     configuration = config
     self.storeURL = fileURL
+    // A copy left by a compaction that never finished (a crash or a forced
+    // quit) holds history: it goes before anything else.
+    if let fileURL {
+      StorageCompaction.removeCopy(of: fileURL)
+    }
     do {
       container = try ModelContainer(for: HistoryItem.self, configurations: config)
     } catch let error {
@@ -48,7 +53,12 @@ class Storage {
   }
 
   func allItems() throws -> [HistoryItem] {
-    try context.fetch(FetchDescriptor<HistoryItem>())
+    #if DEBUG
+    if let fetchFailureForTesting {
+      throw fetchFailureForTesting
+    }
+    #endif
+    return try context.fetch(FetchDescriptor<HistoryItem>())
   }
 
   func unpinnedItems() throws -> [HistoryItem] {
@@ -104,65 +114,100 @@ class Storage {
   }
 
   // Asks SQLite to compact the store after history was deleted: the WAL is
-  // checkpointed and truncated, the database is rebuilt with VACUUM, and the
-  // WAL is truncated again. Rows deleted before this then no longer sit in
-  // the WAL or in free pages of the database file.
+  // checkpointed and truncated, the database is rebuilt with a full VACUUM,
+  // and the WAL is truncated again. VACUUM writes every live row into a new
+  // copy of the database and copies that back over the file, so rows deleted
+  // before it are no longer in any page of `Storage.sqlite` (free pages, and
+  // the unused parts of pages that still hold other rows) or in the WAL.
+  // Whether the deleting connection zeroed them (`secure_delete`) doesn't
+  // matter: that connection is SwiftData's, and Maccy can neither set nor
+  // reliably read it. An incremental vacuum is not enough: it only releases
+  // free pages and leaves deleted bytes in pages that still hold live rows.
   //
-  // This is NOT secure erasure. The file system decides where the old bytes
-  // physically were and when they are overwritten; SSD wear levelling, APFS
-  // snapshots, Time Machine and other backups are out of Maccy's control.
+  // This is NOT secure erasure. VACUUM rewrites the file in place; the file
+  // system decides where the old bytes physically were and when they are
+  // overwritten. SQLite's temporary file for the rebuild, SSD wear levelling,
+  // APFS snapshots, Time Machine and other backups are out of Maccy's
+  // control.
   //
-  // Mechanism: a second SQLite connection to the same file, opened read-write
-  // without create, through the system SQLite library that Core Data also
-  // uses, so both connections share SQLite's per-process file locks. It runs
-  // on the main actor, where every save of this store runs synchronously, so
-  // no SwiftData save is in flight. SQLite's own locking keeps the two
-  // connections consistent: VACUUM takes an exclusive lock and is atomic, so if
-  // it fails (for example SQLITE_BUSY after the timeout) the database is left
-  // exactly as it was and the error is thrown. A checkpoint that cannot finish
-  // reports busy, which is thrown too. Nothing here deletes or rewrites rows,
-  // so remaining items, pinned ones included, are kept either way.
-  func compact() throws {
+  // Mechanism: a second SQLite connection to the same file. SwiftData
+  // exposes neither its connection nor Core Data's store options
+  // (`NSSQLitePragmasOption`), and Core Data's supported route
+  // (`NSSQLiteManualVacuumOption`) only vacuums when a store is added to a
+  // coordinator, which needs the SwiftData container closed; History holds
+  // its models for the whole session. Apple advises against using the SQLite
+  // API on a Core Data store directly, so this relies on behaviour Apple does
+  // not guarantee; the on-disk tests are the tripwire.
+  //
+  // It runs on a background thread: a full VACUUM takes time in proportion
+  // to the size of the store (about 13 s for 1 GB in a measurement). It
+  // can't overlap a save of this store: autosave is off while it runs, and
+  // every save through `save()` (and the other saves here) first stops it
+  // with `stopCompaction()`, which cancels it (a flag and `sqlite3_interrupt`
+  // on its connection) and waits until it no longer holds the store. That
+  // wait is short at every point of the compaction (measured: at most about
+  // 0.4 s for a 1 GB store, see `StorageCompaction` and the PR). A cancelled
+  // compaction leaves the database as it was and throws
+  // `StorageCompactionError.interrupted`. Readers are not blocked: the store
+  // is in WAL mode.
+  //
+  // Nothing here deletes or rewrites rows, so remaining items, pinned ones
+  // included, are kept whether it succeeds or fails.
+  func compact() async throws {
     guard let storeURL, FileManager.default.fileExists(atPath: storeURL.path) else {
       return
     }
+    stopCompaction()
 
-    var database: OpaquePointer?
-    let opened = sqlite3_open_v2(storeURL.path, &database, SQLITE_OPEN_READWRITE, nil)
-    defer { sqlite3_close_v2(database) }
-    guard opened == SQLITE_OK, let database else {
-      throw StorageCompactionError(code: opened)
+    let job = StorageCompaction(url: storeURL, deadline: nil)
+    #if DEBUG
+    job.phaseHandlerForTesting = compactionPhaseHandlerForTesting
+    #endif
+    runningCompaction = job
+    let autosaveEnabled = context.autosaveEnabled
+    context.autosaveEnabled = false
+    defer {
+      if runningCompaction === job {
+        runningCompaction = nil
+      }
+      context.autosaveEnabled = autosaveEnabled
     }
-    sqlite3_busy_timeout(database, 2000)
-
-    try Self.checkpoint(database)
-    try Self.execute("VACUUM", in: database)
-    try Self.checkpoint(database)
+    try await job.runInBackground()
   }
 
-  private static func checkpoint(_ database: OpaquePointer) throws {
-    var statement: OpaquePointer?
-    let prepared = sqlite3_prepare_v2(database, "PRAGMA wal_checkpoint(TRUNCATE)", -1, &statement, nil)
-    defer { sqlite3_finalize(statement) }
-    guard prepared == SQLITE_OK else {
-      throw StorageCompactionError(code: prepared)
+  // Compacts on the calling thread, giving up (and rolling back) at
+  // `deadline` (system uptime). For quitting, when nothing else will save.
+  func compactNow(deadline: TimeInterval) throws {
+    guard let storeURL, FileManager.default.fileExists(atPath: storeURL.path) else {
+      return
     }
-    let stepped = sqlite3_step(statement)
-    guard stepped == SQLITE_ROW else {
-      throw StorageCompactionError(code: stepped)
+    // One still running in the background is stopped, and waited for until
+    // the deadline: a second compaction can't checkpoint while it reads.
+    if let job = runningCompaction {
+      job.cancel()
+      guard job.waitUntilFinished(timeout: deadline - ProcessInfo.processInfo.systemUptime) else {
+        throw StorageCompactionError.interrupted
+      }
+      runningCompaction = nil
     }
-    // The first column is 1 if the checkpoint could not complete.
-    guard sqlite3_column_int(statement, 0) == 0 else {
-      throw StorageCompactionError(code: SQLITE_BUSY)
-    }
+    try StorageCompaction(url: storeURL, deadline: deadline).run()
   }
 
-  private static func execute(_ sql: String, in database: OpaquePointer) throws {
-    let result = sqlite3_exec(database, sql, nil, nil, nil)
-    guard result == SQLITE_OK else {
-      throw StorageCompactionError(code: result)
+  // Cancels a compaction in progress and waits until it no longer holds the
+  // store, so a save can't overlap its rebuild or copy. Once the copy has
+  // committed it only checkpoints, which doesn't get in a save's way.
+  func stopCompaction() {
+    guard let job = runningCompaction else {
+      return
     }
+    job.cancel()
+    job.waitUntilStoreReleased()
+    runningCompaction = nil
   }
+
+  var isCompacting: Bool { runningCompaction != nil }
+
+  private var runningCompaction: StorageCompaction?
 
   func cleanupOrphanedContents() throws -> Int {
     let descriptor = FetchDescriptor<HistoryItemContent>(
@@ -178,6 +223,7 @@ class Storage {
       where: #Predicate { $0.item == nil }
     )
     context.processPendingChanges()
+    stopCompaction()
     try context.save()
 
     return count
@@ -192,6 +238,11 @@ class Storage {
   #if DEBUG
   // Tests set this to make every `save()` throw it.
   var saveFailureForTesting: (any Error)?
+  // Tests set this to make `allItems()` throw it.
+  var fetchFailureForTesting: (any Error)?
+  // Tests set this to act while a background compaction is under way (see
+  // `StorageCompaction.phaseHandlerForTesting`).
+  var compactionPhaseHandlerForTesting: (@Sendable (StorageCompaction, StorageCompaction.Phase) -> Void)?
 
   // Makes `storage` the shared store and returns the one it replaces. Tests
   // only: the history must be reloaded afterwards.
@@ -211,6 +262,7 @@ class Storage {
       throw saveFailureForTesting
     }
     #endif
+    stopCompaction()
     try context.save()
   }
 
@@ -415,6 +467,9 @@ class Storage {
     for content in item.contents where sanitize(content, of: item, to: allowList, undo: undo) {
       changed = true
     }
+    if changed {
+      item.contentsDidChange()
+    }
     return changed
   }
 
@@ -476,6 +531,7 @@ class Storage {
     }
 
     context.processPendingChanges()
+    stopCompaction()
     try context.save()
 
     return count
@@ -499,7 +555,7 @@ final class CleanUpUndoLog {
       let contents = item.contents
       return {
         item.contents = contents
-        item.clearDecodedImageCache()
+        item.contentsDidChange()
       }
     }
   }
@@ -557,4 +613,376 @@ nonisolated struct StorageCompactionError: CustomNSError {
   let code: Int32
 
   var errorCode: Int { Int(code) }
+
+  // Stopped by a save or a deadline; SQLite rolled it back.
+  static let interrupted = StorageCompactionError(code: SQLITE_INTERRUPT)
+  var isInterrupted: Bool { code == SQLITE_INTERRUPT }
+}
+
+// One compaction on its own SQLite connection. `run()` may run on any
+// thread; `cancel()`, `waitUntilStoreReleased()` and `waitUntilFinished()`
+// may be called from another one.
+//
+// It is a full VACUUM, done in two halves so that a save never waits long:
+// 1. The WAL is checkpointed and truncated, and the store is rebuilt into a
+//    new file next to it (`VACUUM INTO`): every live row is written into
+//    fresh pages; nothing deleted is copied.
+// 2. That file is copied back over the store with SQLite's backup API, in
+//    steps of `pagesPerStep` pages, in one write transaction, which commits
+//    at the end. This is what VACUUM itself does in its last phase, but
+//    there in a single call that can't be interrupted (measured: up to about
+//    7 s for a 1 GB store, see the PR).
+// Then the WAL, which now holds the rebuilt pages, is checkpointed into the
+// database file; the file is truncated to the rebuilt size. Old pages, with
+// whatever deleted bytes they held, are overwritten or cut off.
+//
+// A save stops the compaction first (`Storage.stopCompaction`): `cancel()`
+// sets a flag and calls `sqlite3_interrupt` on the connection (safe from
+// another thread; the connection is withdrawn under the same lock before it
+// is closed). The interrupt stops the statement in progress; the progress
+// handler (every `progressSteps` VM instructions) and the busy handler check
+// the flag and the deadline too, and the copy checks them between steps.
+// The save then waits only while the compaction holds the store
+// (`holdsStore`): during the first checkpoint and during the copy, which
+// write to it. A copy that is stopped is rolled back
+// (`sqlite3_backup_finish`) within one step. The rebuild only reads the
+// store, so a save doesn't wait for it to wind down; the rebuild is
+// abandoned, and the compaction can't take the store again once cancelled.
+// A stopped compaction leaves the store as it was and throws
+// `StorageCompactionError.interrupted`.
+//
+// Any write committed after the rebuild began would be lost by the copy, so
+// the copy first takes the write lock and checks `PRAGMA data_version` on a
+// separate connection; if anything was committed it is abandoned. After the
+// copy has committed, the checkpoint runs in PASSIVE mode, which doesn't
+// block SwiftData's reads or writes; a cancel no longer stops it, only the
+// deadline does.
+// A busy database is waited for up to `busyTimeout`, then reported as
+// SQLITE_BUSY.
+nonisolated final class StorageCompaction: @unchecked Sendable {
+  enum Phase: Hashable, Sendable {
+    case rebuilding
+    case copyingBack
+  }
+
+  static let busyTimeout: TimeInterval = 2
+  static let progressSteps: Int32 = 100
+  // 1 MB with the 4 KB pages Core Data uses.
+  static let pagesPerStep: Int32 = 256
+
+  private let url: URL
+  private let deadline: TimeInterval?
+  private let lock = NSLock()
+  private var cancelled = false
+  // The connection `cancel()` interrupts: withdrawn once the copy has
+  // committed, and before it is closed. Guarded by `lock`.
+  private var interruptible: OpaquePointer?
+  // Whether a save must wait. Guarded by `lock`; changes are signalled on
+  // `storeReleased`.
+  private var holdsStore = false
+  private let storeReleased = NSCondition()
+  private let finished = DispatchSemaphore(value: 0)
+
+  #if DEBUG
+  // Tests: called on the compaction's thread, once per phase, while it is
+  // under way (from the progress handler while rebuilding, after the first
+  // step of the copy).
+  var phaseHandlerForTesting: (@Sendable (StorageCompaction, Phase) -> Void)?
+  private var reportedPhases: Set<Phase> = []
+  #endif
+
+  init(url: URL, deadline: TimeInterval?) {
+    self.url = url
+    self.deadline = deadline
+  }
+
+  // The rebuilt copy, next to the store. Holds history while it exists: it
+  // is deleted when the compaction ends, and before each one starts.
+  static func copyURL(for url: URL) -> URL {
+    url.deletingLastPathComponent().appending(path: url.lastPathComponent + "-compacting")
+  }
+
+  static func removeCopy(of url: URL) {
+    let copy = copyURL(for: url).path
+    for path in [copy, copy + "-journal", copy + "-wal", copy + "-shm"] {
+      unlink(path)
+    }
+  }
+
+  func cancel() {
+    lock.withLock {
+      cancelled = true
+      if let interruptible {
+        sqlite3_interrupt(interruptible)
+      }
+    }
+  }
+
+  var isCancelled: Bool { lock.withLock { cancelled } }
+
+  private var isPastDeadline: Bool {
+    deadline.map { ProcessInfo.processInfo.systemUptime >= $0 } ?? false
+  }
+
+  var shouldStop: Bool { isCancelled || isPastDeadline }
+
+  // Returns once a save may proceed: the compaction doesn't hold the store,
+  // and after `cancel()` it can't take it again.
+  func waitUntilStoreReleased() {
+    storeReleased.lock()
+    while lock.withLock({ holdsStore }) {
+      storeReleased.wait()
+    }
+    storeReleased.unlock()
+  }
+
+  func waitUntilFinished() {
+    finished.wait()
+    finished.signal()
+  }
+
+  // Whether it finished within `timeout` seconds.
+  func waitUntilFinished(timeout: TimeInterval) -> Bool {
+    guard finished.wait(timeout: .now() + max(0, timeout)) == .success else {
+      return false
+    }
+    finished.signal()
+    return true
+  }
+
+  func runInBackground() async throws {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+      DispatchQueue.global(qos: .utility).async {
+        do {
+          try self.run()
+          continuation.resume()
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+  }
+
+  func run() throws {
+    defer { finished.signal() }
+    guard !shouldStop else {
+      throw StorageCompactionError.interrupted
+    }
+
+    Self.removeCopy(of: url)
+    defer { Self.removeCopy(of: url) }
+
+    let database = try open(url, flags: SQLITE_OPEN_READWRITE)
+    defer {
+      lock.withLock { interruptible = nil }
+      sqlite3_close_v2(database)
+    }
+    lock.withLock { interruptible = database }
+    // Sees commits made by any other connection (`PRAGMA data_version`).
+    let watcher = try open(url, flags: SQLITE_OPEN_READONLY)
+    defer { sqlite3_close_v2(watcher) }
+
+    // The copy's commit doesn't wait for the WAL to reach the disk (that
+    // would hold the store for as long as syncing the whole rebuilt database
+    // takes); the checkpoint syncs it before writing the database file. A
+    // power loss before then loses the copy, not the store: it is rolled
+    // back, and the compaction stays pending.
+    try execute("PRAGMA synchronous = NORMAL", in: database)
+    // Pages the copy writes go to the WAL as it goes (once 256 are dirty),
+    // not all at its commit: that would hold the store for ~0.3 s.
+    try execute("PRAGMA cache_spill = 256", in: database)
+    let context = Unmanaged.passUnretained(self).toOpaque()
+    sqlite3_busy_handler(database, { context, attempts in
+      let job = Unmanaged<StorageCompaction>.fromOpaque(context!).takeUnretainedValue()
+      guard !job.shouldStop, Double(attempts) * 0.01 < StorageCompaction.busyTimeout else {
+        return 0
+      }
+      usleep(10_000)
+      return 1
+    }, context)
+    sqlite3_progress_handler(database, Self.progressSteps, { context in
+      let job = Unmanaged<StorageCompaction>.fromOpaque(context!).takeUnretainedValue()
+      #if DEBUG
+      job.reached(.rebuilding)
+      #endif
+      return job.shouldStop ? 1 : 0
+    }, context)
+
+    do {
+      try holdingStore {
+        try checkpoint(database, mode: SQLITE_CHECKPOINT_TRUNCATE)
+      }
+      let version = try integer("PRAGMA data_version", in: watcher)
+      try stopIfCancelled()
+      try rebuild(database)
+      try stopIfCancelled()
+      try holdingStore {
+        try copyBack(into: database, unlessChangedSince: version, watcher: watcher)
+      }
+    } catch where shouldStop {
+      throw StorageCompactionError.interrupted
+    }
+    // A cancel from now on doesn't interrupt; one that came during the last
+    // step of the copy left SQLite's interrupt flag set, and a statement
+    // started with none running clears it.
+    lock.withLock { interruptible = nil }
+    sqlite3_progress_handler(database, 0, nil, nil)
+    try execute("SELECT 1", in: database)
+    try checkpointEverything(database)
+    // Empties the WAL if nobody is using it right now; it holds only rebuilt
+    // pages either way.
+    sqlite3_busy_handler(database, nil, nil)
+    sqlite3_wal_checkpoint_v2(database, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
+  }
+
+  private func rebuild(_ database: OpaquePointer) throws {
+    var statement: OpaquePointer?
+    let prepared = sqlite3_prepare_v2(database, "VACUUM INTO ?", -1, &statement, nil)
+    defer { sqlite3_finalize(statement) }
+    guard prepared == SQLITE_OK else {
+      throw StorageCompactionError(code: prepared)
+    }
+    let copy = Self.copyURL(for: url).path
+    sqlite3_bind_text(statement, 1, copy, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+    let stepped = sqlite3_step(statement)
+    guard stepped == SQLITE_DONE else {
+      throw StorageCompactionError(code: stepped)
+    }
+  }
+
+  private func copyBack(into database: OpaquePointer, unlessChangedSince version: Int32, watcher: OpaquePointer) throws {
+    let source = try open(Self.copyURL(for: url), flags: SQLITE_OPEN_READONLY)
+    defer { sqlite3_close_v2(source) }
+    guard let backup = sqlite3_backup_init(database, "main", source, "main") else {
+      throw StorageCompactionError(code: sqlite3_errcode(database))
+    }
+    var finished = false
+    defer {
+      // Rolls back a copy that didn't finish.
+      if !finished {
+        sqlite3_backup_finish(backup)
+      }
+    }
+
+    // One page first: the write lock is held from here until the end.
+    var stepped = sqlite3_backup_step(backup, 1)
+    if stepped == SQLITE_OK {
+      // Anything committed since the rebuild began would be overwritten.
+      guard try integer("PRAGMA data_version", in: watcher) == version else {
+        throw StorageCompactionError.interrupted
+      }
+    }
+    while stepped == SQLITE_OK {
+      #if DEBUG
+      reached(.copyingBack)
+      #endif
+      try stopIfCancelled()
+      stepped = sqlite3_backup_step(backup, Self.pagesPerStep)
+    }
+    finished = true
+    let result = sqlite3_backup_finish(backup)
+    guard stepped == SQLITE_DONE else {
+      throw StorageCompactionError(code: stepped)
+    }
+    guard result == SQLITE_OK else {
+      throw StorageCompactionError(code: result)
+    }
+  }
+
+  // Copies every frame of the WAL into the database file without blocking
+  // other connections, retrying while one of them is in the way.
+  private func checkpointEverything(_ database: OpaquePointer) throws {
+    var attempts = 0
+    while true {
+      var logFrames: Int32 = 0
+      var checkpointedFrames: Int32 = 0
+      let result = sqlite3_wal_checkpoint_v2(
+        database, nil, SQLITE_CHECKPOINT_PASSIVE, &logFrames, &checkpointedFrames
+      )
+      guard result == SQLITE_OK else {
+        throw StorageCompactionError(code: result)
+      }
+      if checkpointedFrames >= logFrames {
+        return
+      }
+      attempts += 1
+      guard !isPastDeadline, Double(attempts) * 0.01 < Self.busyTimeout else {
+        throw StorageCompactionError(code: SQLITE_BUSY)
+      }
+      usleep(10_000)
+    }
+  }
+
+  // Runs `body` holding the store, so a save waits for it. Not once
+  // cancelled: a save that cancelled the compaction may already be under way.
+  private func holdingStore(_ body: () throws -> Void) throws {
+    try lock.withLock {
+      guard !cancelled else {
+        throw StorageCompactionError.interrupted
+      }
+      holdsStore = true
+    }
+    defer {
+      storeReleased.lock()
+      lock.withLock { holdsStore = false }
+      storeReleased.broadcast()
+      storeReleased.unlock()
+    }
+    try body()
+  }
+
+  #if DEBUG
+  private func reached(_ phase: Phase) {
+    guard let phaseHandlerForTesting, lock.withLock({ reportedPhases.insert(phase).inserted }) else {
+      return
+    }
+    phaseHandlerForTesting(self, phase)
+  }
+  #endif
+
+  private func stopIfCancelled() throws {
+    if shouldStop {
+      throw StorageCompactionError.interrupted
+    }
+  }
+
+  private func open(_ url: URL, flags: Int32) throws -> OpaquePointer {
+    var database: OpaquePointer?
+    let opened = sqlite3_open_v2(url.path, &database, flags, nil)
+    guard opened == SQLITE_OK, let database else {
+      sqlite3_close_v2(database)
+      throw StorageCompactionError(code: opened)
+    }
+    return database
+  }
+
+  private func integer(_ sql: String, in database: OpaquePointer) throws -> Int32 {
+    var statement: OpaquePointer?
+    let prepared = sqlite3_prepare_v2(database, sql, -1, &statement, nil)
+    defer { sqlite3_finalize(statement) }
+    guard prepared == SQLITE_OK else {
+      throw StorageCompactionError(code: prepared)
+    }
+    let stepped = sqlite3_step(statement)
+    guard stepped == SQLITE_ROW else {
+      throw StorageCompactionError(code: stepped)
+    }
+    return sqlite3_column_int(statement, 0)
+  }
+
+  private func execute(_ sql: String, in database: OpaquePointer) throws {
+    let result = sqlite3_exec(database, sql, nil, nil, nil)
+    guard result == SQLITE_OK else {
+      throw StorageCompactionError(code: result)
+    }
+  }
+
+  private func checkpoint(_ database: OpaquePointer, mode: Int32) throws {
+    var logFrames: Int32 = 0
+    var checkpointedFrames: Int32 = 0
+    let result = sqlite3_wal_checkpoint_v2(database, nil, mode, &logFrames, &checkpointedFrames)
+    guard result == SQLITE_OK else {
+      throw StorageCompactionError(code: result)
+    }
+  }
 }

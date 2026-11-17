@@ -25,6 +25,14 @@ struct PreviewItemView: View {
               Image(nsImage: image)
                 .resizable()
             }
+          } else if item.isUniversalClipboardImage {
+            // Denied by the sandbox or refused by a check: a neutral
+            // placeholder, never a broken image or the file's path.
+            Text(Self.universalClipboardUnavailableNote)
+              .foregroundStyle(.secondary)
+              .frame(maxWidth: .infinity, alignment: .center)
+              .padding(.vertical, 24)
+              .background(Color.gray.opacity(0.15), in: .rect(cornerRadius: 5))
           } else {
             previewImage {
               ZStack {
@@ -77,15 +85,40 @@ struct PreviewItemView: View {
         .padding(.top, 6)
       }
 
+      if let note = Self.severalPicturesNote(item.imageHasSeveralPictures) {
+        warning(note)
+      }
+
+      let warnings = item.textWarnings
+      if let pastedText = warnings.pastedText {
+        PastedTextView(text: pastedText)
+          .padding(.top, 6)
+      }
+
+      if let note = Self.pastedTextNote(warnings.pastedTextIsNotFileNames) {
+        warning(note)
+      }
+
+      if let note = Self.invisibleCharactersNote(warnings.hasInvisibleCharacters) {
+        warning(note)
+      }
+
       if let note = Self.formattedTextNote(item.formattedTextComparison) {
-        Label {
-          Text(note)
-            .fixedSize(horizontal: false, vertical: true)
-        } icon: {
-          Image(systemName: "exclamationmark.triangle.fill")
-            .foregroundStyle(.orange)
+        if Self.formattedTextNoteIsWarning(item.formattedTextComparison) {
+          warning(note)
+        } else {
+          // Expected on most styled web and Office copies, so a compact,
+          // low-key tag with the sentence as help text, not a warning.
+          Text(Self.formattedTagLabel)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .overlay(Capsule().stroke(.secondary.opacity(0.5), lineWidth: 1))
+            .help(note)
+            .accessibilityLabel(Text(note))
+            .padding(.top, 6)
         }
-        .padding(.top, 6)
       }
 
       Spacer(minLength: 0)
@@ -104,10 +137,10 @@ struct PreviewItemView: View {
         }
       }
 
-      if item.hasImage, let image = item.item.image {
+      if item.hasImage, let size = item.item.imagePixelSize {
         HStack(spacing: 3) {
           Text("Dimensions", tableName: "PreviewItemView")
-          Text("\(Int(image.pixelSize.width))×\(Int(image.pixelSize.height))")
+          Text("\(Int(size.width))×\(Int(size.height))")
         }
       }
 
@@ -151,15 +184,97 @@ struct PreviewItemView: View {
     )
   }
 
+  @ViewBuilder
+  private func warning(_ note: String) -> some View {
+    Label {
+      Text(note)
+        .fixedSize(horizontal: false, vertical: true)
+    } icon: {
+      Image(systemName: "exclamationmark.triangle.fill")
+        .foregroundStyle(.orange)
+    }
+    .padding(.top, 6)
+  }
+
+  static func severalPicturesNote(_ hasSeveralPictures: Bool) -> String? {
+    guard hasSeveralPictures else {
+      return nil
+    }
+    return NSLocalizedString(
+      "SeveralPictures",
+      tableName: "PreviewItemView",
+      value: "This image file contains several pictures. Other apps may show a different one.",
+      comment: ""
+    )
+  }
+
+  static var universalClipboardUnavailableNote: String {
+    NSLocalizedString(
+      "UniversalClipboardImageUnavailable",
+      tableName: "PreviewItemView",
+      value: "Image from another device is not available",
+      comment: ""
+    )
+  }
+
+  // The tag shown for `.renderingNotChecked`; its help text is the note.
+  static var formattedTagLabel: String {
+    NSLocalizedString("FormattedTag", tableName: "PreviewItemView", value: "Formatted", comment: "")
+  }
+
+  // English only; other locales fall back to it.
+  static var pastedTextLabel: String {
+    NSLocalizedString("PastesAsText", tableName: "PreviewItemView", value: "Pastes as text:", comment: "")
+  }
+
+  static func pastedTextNote(_ isNotFileNames: Bool) -> String? {
+    guard isNotFileNames else {
+      return nil
+    }
+    return NSLocalizedString(
+      "PastedTextIsNotFileNames",
+      tableName: "PreviewItemView",
+      value: "Pasting into a text field or terminal, or pasting without formatting, inserts the text above, " +
+        "not the files or image shown.",
+      comment: ""
+    )
+  }
+
+  static func invisibleCharactersNote(_ hasInvisibleCharacters: Bool) -> String? {
+    guard hasInvisibleCharacters else {
+      return nil
+    }
+    return NSLocalizedString(
+      "InvisibleCharacters",
+      tableName: "PreviewItemView",
+      value: "This text contains invisible or direction-changing characters. They are pasted too.",
+      comment: ""
+    )
+  }
+
+  // Whether the note is a warning (the formatted text differs, or couldn't
+  // be read) rather than the neutral note.
+  static func formattedTextNoteIsWarning(_ comparison: FormattedTextComparison) -> Bool {
+    comparison == .differs || comparison == .notChecked
+  }
+
+  // Never says the formatted and plain versions are the same.
   static func formattedTextNote(_ comparison: FormattedTextComparison) -> String? {
     switch comparison {
-    case .notApplicable, .same:
+    case .notApplicable, .noTextDifference:
       return nil
+    case .renderingNotChecked:
+      return NSLocalizedString(
+        "FormattedTextNotCompared",
+        tableName: "PreviewItemView",
+        value: "Formatted paste was not checked against this text.",
+        comment: ""
+      )
     case .differs:
       return NSLocalizedString(
         "FormattedTextDiffers",
         tableName: "PreviewItemView",
-        value: "The formatted version of this copy contains different text from what is shown. " +
+        value: "The formatted version contains different text from what is shown. " +
           "Pasting with formatting may insert text that is not shown here; paste without formatting " +
           "to insert exactly this text.",
         comment: ""
@@ -172,6 +287,39 @@ struct PreviewItemView: View {
           "Paste without formatting to insert exactly this text.",
         comment: ""
       )
+    }
+  }
+}
+
+// The plain text a text destination receives from an item shown as files or
+// an image, labelled, in full or with the truncation note.
+struct PastedTextView: View {
+  private static let largeTextThreshold = 1_000
+
+  let text: SizedString
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(PreviewItemView.pastedTextLabel)
+        .font(.body.bold())
+      if text.byteCount >= Self.largeTextThreshold {
+        LargeTextView(text: text.string)
+          .frame(minHeight: 60, maxHeight: 200)
+      } else {
+        Text(text.string)
+          .font(.body.monospaced())
+          .textSelection(.enabled)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      if let note = PreviewItemView.truncationNote(text.isTruncated) {
+        Label {
+          Text(note)
+            .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+          Image(systemName: "scissors")
+            .foregroundStyle(.secondary)
+        }
+      }
     }
   }
 }

@@ -7,24 +7,35 @@ import SwiftData
 // Size limits for copied content, which comes from any app or web page.
 //
 // - One representation (one type of one copy) may be at most
-//   `maximumRepresentationBytes`, and one copy at most `maximumCopyBytes` in
-//   total. A full-screen screenshot of an 8K display (7680×4320) is about
-//   127 MiB as uncompressed TIFF and about 170 MiB with its PNG, so both fit.
+//   `maximumRepresentationBytes` (64 MiB), and one copy at most
+//   `maximumCopyBytes` (96 MiB) in total. A full-screen capture of a 5K
+//   Retina display (5120×2880) is 59.0 MB (56.3 MiB) as uncompressed 32-bit
+//   TIFF, and macOS adds a PNG of a few MiB to 25 MiB; a MacBook Pro 16"
+//   capture (3456×2234) is 30.9 MB as TIFF. Both fit. A 6K display capture
+//   (6016×3384, 81.4 MB as TIFF) does not, and is left on the system
+//   clipboard. With 999 items history can still hold about 94 GiB at these
+//   limits; a total-history byte budget is a follow-up.
 //   A copy over either limit is not recorded at all (it stays on the system
-//   clipboard): dropping only the oversized representation would store a copy
+//   clipboard, and a notification with fixed text says a copy was too large
+//   to save): dropping only the oversized representation would store a copy
 //   whose formatted and plain versions no longer match what was copied.
 //   NSPasteboard has no way to learn a representation's size without
-//   transferring it, so each one is checked as soon as it is read, and
-//   nothing more is read once a limit is passed.
-// - An image is decoded (for the list, the preview, accessibility or text
-//   recognition) only if its header says it has at most `maximumImagePixels`
-//   pixels, so a small file that expands to gigabytes is never decoded.
+//   transferring it, so each one is checked as soon as it is read, before
+//   anything decodes it, and nothing more is read once a limit is passed
+//   (see PasteboardCopyRead).
+// - An image is decoded (for the list, the preview, accessibility, text
+//   recognition or export) only through ValidatedImage, which checks every
+//   image in the data against `maximumImagePixels` before decoding one.
 nonisolated enum ContentLimits {
-  static let defaultMaximumRepresentationBytes = 128 * 1_024 * 1_024
-  static let defaultMaximumCopyBytes = 192 * 1_024 * 1_024
+  static let defaultMaximumRepresentationBytes = 64 * 1_024 * 1_024
+  static let defaultMaximumCopyBytes = 96 * 1_024 * 1_024
   // 100 megapixels, about 400 MB once decoded: five full-screen screenshots
   // of a 6K display.
   static let defaultMaximumImagePixels = 100_000_000
+  // Metadata the watcher reads besides the stored content (the
+  // org.nspasteboard.source marker): a bundle identifier or Maccy's own
+  // marker, so 1 KiB is ample. Never more than one representation may be.
+  static let defaultMaximumMarkerBytes = 1_024
 
   #if DEBUG
   nonisolated(unsafe) static var maximumRepresentationBytesForTesting: Int?
@@ -46,6 +57,10 @@ nonisolated enum ContentLimits {
     return defaultMaximumCopyBytes
   }
 
+  static var maximumMarkerBytes: Int {
+    min(defaultMaximumMarkerBytes, maximumRepresentationBytes)
+  }
+
   static var maximumImagePixels: Int {
     #if DEBUG
     if let maximumImagePixelsForTesting { return maximumImagePixelsForTesting }
@@ -56,12 +71,15 @@ nonisolated enum ContentLimits {
   // Why a copy was not recorded. Holds only type names and sizes, never content.
   enum Violation: Equatable, CustomStringConvertible {
     case representation(String, bytes: Int)
+    case marker(String, bytes: Int)
     case copy(bytes: Int)
 
     var description: String {
       switch self {
       case .representation(let type, let bytes):
         return "representation \(type) is \(bytes) bytes, limit \(ContentLimits.maximumRepresentationBytes)"
+      case .marker(let type, let bytes):
+        return "marker \(type) is \(bytes) bytes, limit \(ContentLimits.maximumMarkerBytes)"
       case .copy(let bytes):
         return "copy is over \(bytes) bytes, limit \(ContentLimits.maximumCopyBytes)"
       }
@@ -77,36 +95,24 @@ nonisolated enum ContentLimits {
       guard count <= ContentLimits.maximumRepresentationBytes else {
         return .representation(type.rawValue, bytes: count)
       }
+      return addToTotal(count)
+    }
+
+    // Metadata read besides the stored content has a small fixed limit.
+    mutating func addMarker(_ type: NSPasteboard.PasteboardType, bytes count: Int) -> Violation? {
+      guard count <= ContentLimits.maximumMarkerBytes else {
+        return .marker(type.rawValue, bytes: count)
+      }
+      return addToTotal(count)
+    }
+
+    private mutating func addToTotal(_ count: Int) -> Violation? {
       bytes += count
       guard bytes <= ContentLimits.maximumCopyBytes else {
         return .copy(bytes: bytes)
       }
       return nil
     }
-  }
-
-  // The pixel size an image's header declares, without decoding it.
-  static func pixelSize(of data: Data) -> (width: Int, height: Int)? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
-          CGImageSourceGetCount(source) > 0,
-          let properties = CGImageSourceCopyPropertiesAtIndex(
-            source, 0, [kCGImageSourceShouldCache: false] as CFDictionary
-          ) as? [CFString: Any],
-          let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-          let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-          width > 0, height > 0 else {
-      return nil
-    }
-    return (width, height)
-  }
-
-  // Whether the image may be decoded: its header declares a size within
-  // `maximumImagePixels`. Unreadable headers are not decoded either.
-  static func imageMayBeDecoded(_ data: Data) -> Bool {
-    guard let size = pixelSize(of: data) else {
-      return false
-    }
-    return Double(size.width) * Double(size.height) <= Double(maximumImagePixels)
   }
 }
 
@@ -182,6 +188,8 @@ extension History {
     guard !OCRSetting.current.isEnabled else {
       return 0
     }
+    // Nothing queued reaches Vision, and a running request is cancelled.
+    HistoryItem.cancelAllTextRecognition()
 
     let logger = Logger(label: AppIdentity.bundleIdentifier)
     let context = Storage.shared.context

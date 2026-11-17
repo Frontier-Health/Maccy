@@ -62,10 +62,10 @@ extension SharedStateTests {
     }
 
     @Test("Image")
-    func image() throws {
+    func image() async throws {
       let image = try #require(NSImage(named: "StatusBarMenuImage"))
       let itemDecorator = historyItemDecorator(image)
-      itemDecorator.sizeImages()
+      await itemDecorator.sizeImages()
       #expect(itemDecorator.title == "")
       #expect(try #require(itemDecorator.previewImage).size == image.size)
       #expect(try #require(itemDecorator.thumbnailImage).size == image.size)
@@ -73,10 +73,10 @@ extension SharedStateTests {
 
     // We also need to add test for image with width bigger than max width.
     @Test("Image with height bigger than max height")
-    func imageWithHeightBiggerThanMaxHeight() throws {
+    func imageWithHeightBiggerThanMaxHeight() async throws {
       let image = try #require(NSImage(named: "NSApplicationIcon"))
       let itemDecorator = historyItemDecorator(image)
-      itemDecorator.sizeImages()
+      await itemDecorator.sizeImages()
       #expect(try #require(itemDecorator.thumbnailImage).size == NSSize(width: 40, height: 40))
     }
 

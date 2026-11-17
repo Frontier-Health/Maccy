@@ -27,6 +27,7 @@ Maccy works on macOS Sonoma 14 or higher.
   * [How to restore hidden footer?](#how-to-restore-hidden-footer)
   * [How to ignore copies from Universal Clipboard?](#how-to-ignore-copies-from-universal-clipboard)
   * [My keyboard shortcut stopped working in password fields. How do I fix this?](#my-keyboard-shortcut-stopped-working-in-password-fields-how-do-i-fix-this)
+  * [Why does a copy of several items paste less text from Maccy?](#why-does-a-copy-of-several-items-paste-less-text-from-maccy)
 * [Translations](#translations)
 * [Motivation](#motivation)
 * [License](#license)
@@ -160,6 +161,10 @@ defaults write <ORG_BUNDLE_ID> showFooter 1
 ### My keyboard shortcut stopped working in password fields. How do I fix this?
 
 If your shortcut produces a character (like `Option+C` → "ç"), macOS security may block it in password fields. Use [Karabiner-Elements](https://karabiner-elements.pqrs.org/) to remap your shortcut to a different combination like `Cmd+Shift+C`. [See detailed solution](docs/keyboard-shortcut-password-fields.md).
+
+### Why does a copy of several items paste less text from Maccy?
+
+Some apps put a selection on the clipboard as several items (for example several table rows, or one item per selected block). For each kind of content (plain text, formatted text, image) Maccy keeps the first item's value, so what Maccy shows is exactly what it pastes. All copied files are kept. A direct paste of the original copy can join the text of every item, so pasting a multi-item text copy from Maccy can insert less than pasting it straight away would.
 
 ## Translations
 

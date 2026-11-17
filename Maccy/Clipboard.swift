@@ -193,6 +193,8 @@ class Clipboard {
   @objc
   @MainActor
   func checkForChangesInPasteboard() { // swiftlint:disable:this cyclomatic_complexity function_body_length
+    // Read once: this is the copy the rest of this check works on.
+    let observedChangeCount = pasteboard.changeCount
     CaptureMode.absorbLegacyOneShot(in: capturePreferences)
     let storagePolicy = StoragePolicy.current
     let settingsChanged = captureSettingsChanges.take()
@@ -200,8 +202,6 @@ class Clipboard {
     let previousCaptureMode = lastCheckedCaptureMode
     lastCheckedCaptureMode = captureMode
 
-    // Read once: this is the copy the rest of this check works on.
-    let observedChangeCount = pasteboard.changeCount
     guard observedChangeCount != changeCount else {
       return
     }
@@ -244,84 +244,22 @@ class Clipboard {
     // so it's better to merge all data into a single record.
     // - https://github.com/p0deje/Maccy/issues/78
     // - https://github.com/p0deje/Maccy/issues/472
-    // Ignore rules read the text of the string, file URL, RTF and HTML
-    // representations whatever the storage setting, without storing it.
+    // The record keeps one value per type, the first item's, so what is shown
+    // is what is pasted; every distinct copied file is kept. Only the
+    // allow-list is read, each representation once, and each is checked
+    // against the size limits before anything decodes it (see
+    // PasteboardCopyRead). That also leaves out the Microsoft Word link types
+    // and PDF that bookmarks and cross-references add
+    // (https://github.com/p0deje/Maccy/issues/613,
+    // https://github.com/p0deje/Maccy/issues/770).
     let items = pasteboard.pasteboardItems ?? []
-    guard !ignoreRules.rejects(items) else { return }
+    let copy = PasteboardCopyRead.read(items, storing: allowList)
+    // Ignore rules read the text of the string, file URL, RTF and HTML
+    // representations of every item whatever the storage setting, without
+    // storing it, reusing what the snapshot already read.
+    let rejected = copy.violation == nil && ignoreRules.rejects(items, reading: copy.lookup(item:type:))
 
-    // The record keeps one value per type: the one from the first pasteboard
-    // item that has the type, so what is shown is what is pasted. For HTML,
-    // RTF and images that is also what `NSPasteboard.data(forType:)` hands an
-    // app pasting the original copy. For plain text that API joins every
-    // item's string with newlines; Maccy keeps only the first, so it never
-    // doubles text that apps (BBEdit, Edge) put in two items. Later values of
-    // a type are not read. File URLs are the exception: a Finder copy of
-    // several files has one item per file, and every distinct file is kept
-    // and pasted back as its own item.
-    var contents = [HistoryItemContent]()
-    var capturedTypes = Set<NSPasteboard.PasteboardType>()
-    var capturedFileURLs = Set<Data>()
-    var duplicatesDropped = 0
-    // Size limits (see ContentLimits), checked as each representation is read.
-    var tally = ContentLimits.Tally()
-    var violation: ContentLimits.Violation?
-    reading: for item in items {
-      let types = Set(item.types)
-      // Only representations that would be stored are read for this check.
-      if allowList.allows(.string) && types.contains(.string) && isEmptyString(item) &&
-          !richText(item, storing: allowList) {
-        continue
-      }
-
-      // Only the allow-list is stored. Beyond the reads above, the data of any
-      // other representation is never read. That also leaves out the Microsoft
-      // Word link types and PDF that bookmarks and cross-references add
-      // (https://github.com/p0deje/Maccy/issues/613,
-      // https://github.com/p0deje/Maccy/issues/770).
-      for type in item.types {
-        guard allowList.allows(type) else { continue }
-        if type != .fileURL && capturedTypes.contains(type) {
-          duplicatesDropped += 1
-          continue
-        }
-        guard case .store(let value) = allowList.admission(of: type, value: item.data(forType: type)) else {
-          continue
-        }
-        if let exceeded = tally.add(type, bytes: value?.count ?? 0) {
-          violation = exceeded
-          break reading
-        }
-        if type == .fileURL {
-          // A file URL without data has nothing to paste.
-          guard let value else { continue }
-          guard capturedFileURLs.insert(value).inserted else {
-            duplicatesDropped += 1
-            continue
-          }
-        }
-        capturedTypes.insert(type)
-        contents.append(HistoryItemContent(type: type.rawValue, value: value))
-      }
-    }
-    // A copy over a limit is not recorded at all, and doesn't use up skip next.
-    if let violation {
-      logger.warning("Copy not recorded: \(violation.description)")
-      return
-    }
-    if duplicatesDropped > 0 {
-      logger.info(
-        "Copy of \(items.count) pasteboard items kept one value per type; \(duplicatesDropped) duplicates not stored"
-      )
-    }
-
-    // Metadata alone is not a copy worth recording.
-    guard allowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
-      return
-    }
-
-    let isMaccySource = captureMode == .skipNext &&
-      pasteboard.string(forType: .source) == NSPasteboard.PasteboardType.fromMaccy.rawValue
-
+    // ---- End of pasteboard reads. ----
     #if DEBUG
     afterInspectionForTesting?()
     #endif
@@ -336,6 +274,32 @@ class Clipboard {
       return
     }
 
+    // A copy over a limit is not recorded at all, and doesn't use up skip next.
+    if let violation = copy.violation {
+      logger.warning("Copy not recorded: \(violation.description)")
+      if shouldNotifyCopyTooLarge(captureMode: captureMode, isFromMaccy: isFromMaccy || copy.isMaccySource) {
+        Notifier.notifyCopyTooLarge()
+      }
+      return
+    }
+
+    // All payload decisions below use only the bounded snapshot.
+
+    guard !rejected else { return }
+
+    let contents = copy.contents(storing: allowList)
+    let duplicatesDropped = copy.duplicatesDropped + copy.duplicateFileURLs
+    if duplicatesDropped > 0 {
+      logger.info(
+        "Copy of \(items.count) pasteboard items kept one value per type; \(duplicatesDropped) duplicates not stored"
+      )
+    }
+
+    // Metadata alone is not a copy worth recording.
+    guard allowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
+      return
+    }
+
     if captureMode == .skipNext {
       // This copy would have been recorded, so it is the one to skip. Maccy's
       // own writes don't count. The storage setting may have changed while
@@ -346,7 +310,7 @@ class Clipboard {
             currentAllowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
         return
       }
-      if !isFromMaccy && !isMaccySource {
+      if !isFromMaccy && !copy.isMaccySource {
         CaptureMode.consumeSkip(in: capturePreferences)
         // The watcher's own write is not an uncertain transition, so the copy
         // after the skipped one is recorded.
@@ -359,7 +323,73 @@ class Clipboard {
       return
     }
 
+    let application = sourceAppBundle
+    // An image file holding several images is made unambiguous before it is
+    // stored (ValidatedImage.canonicalForm), off the main actor; the rest of
+    // the copy is recorded with it when that is done. Single images, the
+    // usual case, are recorded now, byte for byte.
+    if contents.contains(where: { content in
+      Self.imageTypes.contains(content.type) && content.value.map(ValidatedImage.hasSeveralImages) == true
+    }) {
+      let capturedAt = Date.now
+      let task = Task { @MainActor [weak self] in
+        guard let self, let canonical = await Self.canonicalImages(contents, logger: logger) else { return }
+        // Capture may have been paused, or the storage setting changed,
+        // while the images were re-encoded.
+        guard CaptureMode.effective(in: capturePreferences) == .capturing,
+              let currentAllowList = StoragePolicy.current.allowList,
+              currentAllowList.hasStorableContent(canonical.map { NSPasteboard.PasteboardType($0.type) }) else {
+          return
+        }
+        record(canonical, application: application, capturedAt: capturedAt)
+      }
+      #if DEBUG
+      pendingImageCanonicalizationForTesting = task
+      #endif
+      return
+    }
+
+    record(contents, application: application, capturedAt: nil)
+  }
+
+  private static let imageTypes = Set(StorageType.images.types.map(\.rawValue))
+
+  #if DEBUG
+  // The latest capture waiting for its images to be re-encoded.
+  var pendingImageCanonicalizationForTesting: Task<Void, Never>?
+  #endif
+
+  // Replaces each multi-image representation with its single-image form.
+  // A representation that can't be re-encoded is left out, with a
+  // content-free log line; nil if nothing is left.
+  @MainActor
+  private static func canonicalImages(_ contents: [HistoryItemContent], logger: Logger) async -> [HistoryItemContent]? {
+    var kept: [HistoryItemContent] = []
+    for content in contents {
+      guard imageTypes.contains(content.type), let value = content.value else {
+        kept.append(content)
+        continue
+      }
+      switch await ValidatedImage.canonicalize(value) {
+      case .unchanged:
+        kept.append(content)
+      case .replaced(let single):
+        content.value = single
+        kept.append(content)
+      case .refused:
+        logger.warning("Image representation \(content.type) not stored: several images that couldn't be re-encoded")
+      }
+    }
+    return kept.isEmpty ? nil : kept
+  }
+
+  @MainActor
+  private func record(_ contents: [HistoryItemContent], application: String?, capturedAt: Date?) {
     let historyItem = HistoryItem(contents: contents)
+    if let capturedAt {
+      historyItem.firstCopiedAt = capturedAt
+      historyItem.lastCopiedAt = capturedAt
+    }
 
     if #unavailable(macOS 15.0) {
       // On macOS 14 the history item needs to be inserted into storage directly after creating it.
@@ -369,10 +399,22 @@ class Clipboard {
       }
     }
 
-    historyItem.application = sourceAppBundle
+    historyItem.application = application
     historyItem.regenerateTitle()
 
     onNewCopyHooks.forEach({ $0(historyItem) })
+  }
+
+  // Whether to tell the user an oversized copy was not saved. Only when Maccy
+  // can establish the copy would otherwise have been saved: capture is on
+  // (paused and uncertain changes, ignored apps and ignored, concealed,
+  // transient or auto-generated types have returned before this), it is not
+  // the copy skip next is armed for (whose skip stays armed), it is not
+  // Maccy's own write, and no ignore rule is configured, since the rules
+  // can't be evaluated on a copy that wasn't read in full. Otherwise it is
+  // only logged.
+  private func shouldNotifyCopyTooLarge(captureMode: CaptureMode, isFromMaccy: Bool) -> Bool {
+    captureMode == .capturing && !isFromMaccy && !ignoreRules.hasRules
   }
 
   private func shouldIgnore(_ types: Set<NSPasteboard.PasteboardType>, storing allowList: StorageAllowList) -> Bool {
@@ -397,30 +439,6 @@ class Clipboard {
 
       return Defaults[.ignoredApps].contains(sourceAppBundle)
     }
-  }
-
-  private func isEmptyString(_ item: NSPasteboardItem) -> Bool {
-    guard let string = item.string(forType: .string) else {
-      return true
-    }
-
-    return string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-  }
-
-  private func richText(_ item: NSPasteboardItem, storing allowList: StorageAllowList) -> Bool {
-    // RTF is imported only within RichTextImport's bounds. HTML is scanned,
-    // never rendered, so nothing it refers to is loaded.
-    if allowList.allows(.rtf), let rtf = item.data(forType: .rtf) {
-      if let text = RichTextImport.text(fromRTF: rtf) {
-        return !text.isEmpty
-      }
-    }
-
-    if allowList.allows(.html), let html = item.data(forType: .html) {
-      return ClipboardHTMLText.hasContent(html)
-    }
-
-    return false
   }
 
   // Some applications requires window be unfocused and focused back to sync the clipboard.

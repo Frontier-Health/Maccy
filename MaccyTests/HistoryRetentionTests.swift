@@ -1,27 +1,59 @@
 import AppKit
 import Defaults
 import Foundation
+import SQLite3
 import SwiftData
 import Testing
 @testable import Maccy
 
-// Records removal failures instead of showing an alert.
+// Records failures instead of showing an alert. Each call is one alert.
 @MainActor
 final class RecordingRemovalFailureReporter: HistoryRemovalFailureReporting {
-  private(set) var failures: [HistoryRemoval] = []
+  private(set) var reports: [[HistoryFailure]] = []
 
-  func removalFailed(_ removal: HistoryRemoval, error: any Error) {
-    failures.append(removal)
+  // Every failed removal reported, in order.
+  var failures: [HistoryRemoval] {
+    reports.joined().compactMap { failure in
+      switch failure {
+      case .removal(let removal): removal
+      default: nil
+      }
+    }
+  }
+
+  var exportFailures: Int { reports.joined().filter { $0 == .exportRemoval }.count }
+
+  func report(_ failures: [HistoryFailure], errorCode: String?) {
+    reports.append(failures)
   }
 }
 
 private struct InjectedSaveFailure: Error {}
 
-// The clock History measures expiry with, moved by the test.
+// Set on one thread, read on another.
+private final class SharedFlag: @unchecked Sendable {
+  private let lock = NSLock()
+  private var raised = false
+
+  var isRaised: Bool { lock.withLock { raised } }
+
+  func raise() {
+    lock.withLock { raised = true }
+  }
+}
+
+// The clocks History measures expiry and compaction delays with, moved by the
+// test.
 @MainActor
 final class TestClock {
   var now: Date
+  var uptime: TimeInterval = 10_000
   init(_ now: Date) { self.now = now }
+
+  func advance(by interval: TimeInterval) {
+    now = now.addingTimeInterval(interval)
+    uptime += interval
+  }
 }
 
 // A raw preference value of any type, so a test can restore it exactly.
@@ -90,8 +122,11 @@ extension SharedStateTests {
       Notifier.client = client
       History.removalFailureReporter = reporter
       history.expiryPreferences = expiryDefaults
+      history.maintenanceState = expiryDefaults
       history.now = { [clock] in clock.now }
+      history.uptime = { [clock] in clock.uptime }
       history.resetAutomaticRemovalFailuresForTesting()
+      HistoryIntentAccess.readinessTimeout = .milliseconds(300)
     }
 
     deinit {
@@ -109,11 +144,16 @@ extension SharedStateTests {
     // when it ends (deinit can't reach main-actor state).
     private func restoreHistory() {
       Storage.shared.saveFailureForTesting = nil
+      Storage.shared.fetchFailureForTesting = nil
       Notifier.client = savedClient
       History.removalFailureReporter = savedReporter
       history.expiryPreferences = Defaults.Keys.historyExpiryHours.suite
+      history.maintenanceState = Defaults.Keys.historyExpiryHours.suite
       history.now = { Date.now }
+      history.uptime = { ProcessInfo.processInfo.systemUptime }
       history.resetAutomaticRemovalFailuresForTesting()
+      HistoryIntentAccess.readinessTimeout = .seconds(10)
+      IntentImageExports.directoryForTesting = nil
     }
 
     // MARK: Failed removals change nothing
@@ -469,11 +509,11 @@ extension SharedStateTests {
       client.resolveAdds()
       try Storage.shared.save()
 
-      history.performLaunchMaintenance()
+      relaunch()
 
       #expect(shownItems() == [pinned.item])
       try assertStored(["pinned"])
-      #expect(reporter.failures.isEmpty)
+      #expect(reporter.reports.isEmpty)
     }
 
     @Test("Launch leaves history when clear-on-quit is off, but expires and trims it")
@@ -488,7 +528,7 @@ extension SharedStateTests {
       }
       try Storage.shared.save()
 
-      history.performLaunchMaintenance()
+      relaunch()
 
       try assertStored(["stored 2", "stored 3"])
       #expect(history.items.count == 2)
@@ -502,13 +542,13 @@ extension SharedStateTests {
       try Storage.shared.save()
 
       Storage.shared.saveFailureForTesting = InjectedSaveFailure()
-      history.performLaunchMaintenance()
+      relaunch()
       Storage.shared.saveFailureForTesting = nil
 
       try assertStored(["still stored"])
       #expect(history.items.count == 1)
-      #expect(reporter.failures == [.clearOnLaunch])
-      #expect(history.automaticRemovalFailedAt != nil)
+      #expect(reporter.reports == [[.removal(.clearOnLaunch)]])
+      #expect(history.failingOperations.keys.sorted() == [.clearOnLaunch])
     }
 
     // MARK: Compaction
@@ -539,7 +579,6 @@ extension SharedStateTests {
     }
 
     private func compactAndCheck(path: String, directory: URL, url: URL) async throws {
-      let wal = URL(fileURLWithPath: url.path + "-wal")
       try await history.load()
 
       let secret = "A6-DELETED-MARKER-\(UUID().uuidString)"
@@ -547,11 +586,11 @@ extension SharedStateTests {
       expiryDefaults.set(path == "expiry" ? 1 : 0, forKey: HistoryExpiry.preferenceKey)
       let pinned = history.added(historyItem(kept, lastCopied: 0))
       history.togglePin(pinned)
-      for index in 0..<5 {
-        history.added(historyItem("\(secret)-\(index)", lastCopied: -2))
-      }
+      let removedMarkers = try addRemovableContent(secret: secret)
       try Storage.shared.save()
-      #expect(contains(url, secret) || contains(wal, secret), "the marker must be on disk before removal")
+      for marker in [Data(secret.utf8)] + removedMarkers {
+        #expect(try !filesContaining(marker, in: directory).isEmpty, "the marker must be on disk before removal")
+      }
 
       switch path {
       case "clear": #expect(history.clear())
@@ -559,18 +598,18 @@ extension SharedStateTests {
       case "clearOnQuit": #expect(history.clearOnQuit())
       case "clearOnLaunch":
         Defaults[.clearOnQuit] = true
-        history.performLaunchMaintenance()
+        relaunch()
       default:
         history.runExpiry()
       }
+      await history.waitForCompaction()
 
-      #expect(!contains(url, secret))
-      #expect(!contains(wal, secret))
-      #expect(reporter.failures.isEmpty)
-      // Only the store and SQLite's own sidecar files: no external-storage
-      // blobs that could keep deleted content.
-      let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-      #expect(Set(files).isSubset(of: ["Storage.sqlite", "Storage.sqlite-wal", "Storage.sqlite-shm"]))
+      #expect(reporter.reports.isEmpty)
+      #expect(!history.isCompactionPending)
+      try assertNoSidecarFiles(in: directory)
+      for marker in [Data(secret.utf8)] + removedMarkers {
+        #expect(try filesContaining(marker, in: directory).isEmpty, "a removed marker is still on disk")
+      }
 
       // What remains is intact, in this store and when opened afresh.
       // Kept alive while its models are read: they become unusable once
@@ -579,7 +618,7 @@ extension SharedStateTests {
       let stored = try reopened.allItems()
       if path == "clearAll" {
         #expect(stored.isEmpty)
-        #expect(!contains(url, kept) && !contains(wal, kept))
+        #expect(try filesContaining(kept, in: directory).isEmpty)
         return
       }
       #expect(shownItems() == [pinned.item])
@@ -595,13 +634,923 @@ extension SharedStateTests {
     }
 
     @Test("Compaction leaves an in-memory store alone")
-    func compactionOfInMemoryStore() throws {
+    func compactionOfInMemoryStore() async throws {
       defer { restoreHistory() }
       #expect(Storage.shared.storeURL == nil)
-      try Storage.shared.compact()
+      try await Storage.shared.compact()
+    }
+
+    @Test("Rows deleted from pages that keep other rows are gone after compaction, even with secure_delete off")
+    func compactionRemovesRowsFromLivePages() async throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let url = directory.appending(path: "Storage.sqlite")
+      let marker = "A6-LIVE-PAGE-MARKER-\(UUID().uuidString)"
+
+      // A store with SwiftData's schema and short items, kept ones and ones
+      // to delete interleaved, so that they share pages.
+      let storage = Storage(storeURL: url)
+      for index in 0..<40 {
+        for value in ["kept-\(index)-\(UUID().uuidString)", "\(marker)-\(index)"] {
+          let item = HistoryItem()
+          storage.context.insert(item)
+          item.contents = [HistoryItemContent(type: NSPasteboard.PasteboardType.string.rawValue, value: Data(value.utf8))]
+          item.numberOfCopies = 1
+          item.regenerateTitle()
+        }
+      }
+      try storage.save()
+
+      // Deleted through a connection with secure_delete off, as SwiftData's
+      // own connection may be: the deleted bytes stay in pages that still
+      // hold kept rows.
+      var database: OpaquePointer?
+      try #require(sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+      let connection = try #require(database)
+      defer { sqlite3_close_v2(connection) }
+      try #require(sqlite3_exec(connection, "PRAGMA secure_delete = OFF", nil, nil, nil) == SQLITE_OK)
+      #expect(try deleteRows(containing: marker, in: connection) >= 40)
+      sqlite3_exec(connection, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
+      try #require(!filesContaining(marker, in: directory).isEmpty,
+                   "the deletion must leave the marker on disk, or this test proves nothing")
+
+      try await storage.compact()
+
+      #expect(try filesContaining(marker, in: directory).isEmpty, "a deleted row is still on disk")
+      try assertNoSidecarFiles(in: directory)
+      #expect(try integrityCheck(of: url) == "ok")
+      // Everything kept is still there, read afresh.
+      let reopened = Storage(storeURL: url)
+      let values = try reopened.allItems().compactMap { $0.contents.first?.value }.map { String(decoding: $0, as: UTF8.self) }
+      #expect(values.count == 40)
+      #expect(values.allSatisfy { $0.hasPrefix("kept-") })
+      withExtendedLifetime(storage) {}
+      withExtendedLifetime(reopened) {}
+    }
+
+    // MARK: Export removal
+
+    @Test("An exported image that can't be deleted is reported, kept and retried until it is gone",
+          arguments: ["delete", "clear", "expiry"])
+    func failedExportRemoval(path: String) throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      IntentImageExports.directoryForTesting = directory
+      defer {
+        chmod(directory.path, 0o700)
+        IntentImageExports.retryPendingRemovals()
+        try? FileManager.default.removeItem(at: directory)
+      }
+      expiryDefaults.set(path == "expiry" ? 1 : 0, forKey: HistoryExpiry.preferenceKey)
+      let owner = history.added(historyItem("export owner", lastCopied: -3))
+      let kept = history.added(historyItem("kept", lastCopied: 0))
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: owner.item)
+      try Storage.shared.save()
+
+      // The directory is read-only: its files can't be unlinked.
+      #expect(chmod(directory.path, 0o500) == 0)
+      switch path {
+      case "delete": #expect(history.delete(owner))
+      case "clear": #expect(history.clear())
+      default: #expect(history.purgeExpiredItems() == 1)
+      }
+
+      // History was deleted; the file is still there, remembered and reported.
+      try assertStored(path == "delete" || path == "expiry" ? ["kept"] : [])
+      #expect(FileManager.default.fileExists(atPath: export.path))
+      #expect(IntentImageExports.pendingRemovals.contains(export))
+      #expect(reporter.exportFailures == 1)
+      #expect(reporter.failures.isEmpty)
+      #expect(history.failingOperations[.exportRemoval] != nil)
+
+      // Still failing: retried, not reported again.
+      history.runMaintenance()
+      #expect(FileManager.default.fileExists(atPath: export.path))
+      #expect(reporter.exportFailures == 1)
+
+      // Once the file can be deleted, maintenance deletes it and the failure clears.
+      #expect(chmod(directory.path, 0o700) == 0)
+      history.runMaintenance()
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+      #expect(!IntentImageExports.hasPendingRemovals)
+      #expect(history.failingOperations[.exportRemoval] == nil)
+      withExtendedLifetime(kept) {}
+    }
+
+    @Test("An export that is already gone counts as removed")
+    func absentExportIsRemoved() throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      IntentImageExports.directoryForTesting = directory
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let owner = history.added(historyItem("export owner"))
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: owner.item)
+      try FileManager.default.removeItem(at: export)
+
+      #expect(history.delete(owner))
+      #expect(!IntentImageExports.hasPendingRemovals)
+      #expect(reporter.reports.isEmpty)
+      #expect(history.failingOperations.isEmpty)
+    }
+
+    @Test("An export in a directory that can't be searched is not taken as gone: it stays pending and is reported",
+          arguments: ["delete", "clear"])
+    func inaccessibleExportDirectory(path: String) throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      IntentImageExports.directoryForTesting = directory
+      defer {
+        chmod(directory.path, 0o700)
+        IntentImageExports.retryPendingRemovals()
+        try? FileManager.default.removeItem(at: directory)
+      }
+      let owner = history.added(historyItem("export owner"))
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: owner.item)
+      try Storage.shared.save()
+
+      // No permission on the directory: the file can't even be looked up, so
+      // `fileExists` says false although the file is there.
+      #expect(chmod(directory.path, 0o000) == 0)
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+      switch path {
+      case "delete": #expect(history.delete(owner))
+      default: #expect(history.clear())
+      }
+
+      try assertStored([])
+      #expect(IntentImageExports.pendingRemovals.contains(export))
+      #expect(reporter.exportFailures == 1)
+      #expect(history.failingOperations[.exportRemoval] != nil)
+
+      // With permissions back, the file is still there; maintenance deletes it.
+      #expect(chmod(directory.path, 0o700) == 0)
+      #expect(FileManager.default.fileExists(atPath: export.path))
+      history.runMaintenance()
+      #expect(!FileManager.default.fileExists(atPath: export.path))
+      #expect(!IntentImageExports.hasPendingRemovals)
+      #expect(history.failingOperations[.exportRemoval] == nil)
+    }
+
+    @Test("Only \"no such file\" counts as a file being gone")
+    func absenceIsShownOnlyByNoSuchFile() throws {
+      defer { restoreHistory() }
+      let noSuchFile = NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError, userInfo: [
+        NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))
+      ])
+      let noPermission = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: [
+        NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))
+      ])
+      #expect(IntentImageExports.reportsNoSuchFile(noSuchFile))
+      #expect(IntentImageExports.reportsNoSuchFile(NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))))
+      #expect(!IntentImageExports.reportsNoSuchFile(noPermission))
+      #expect(!IntentImageExports.reportsNoSuchFile(NSError(domain: NSPOSIXErrorDomain, code: Int(EBUSY))))
+      #expect(!IntentImageExports.reportsNoSuchFile(NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))))
+
+      let directory = try temporaryDirectory()
+      defer {
+        chmod(directory.path, 0o700)
+        try? FileManager.default.removeItem(at: directory)
+      }
+      let file = directory.appending(path: "file")
+      try Data().write(to: file)
+      #expect(!IntentImageExports.isAbsent(file))
+      #expect(IntentImageExports.isAbsent(directory.appending(path: "missing")))
+      #expect(chmod(directory.path, 0o000) == 0)
+      #expect(!IntentImageExports.isAbsent(file))
+    }
+
+    // MARK: Per-operation failures
+
+    @Test("A failed clear at launch stays reported after expiry succeeds, and is retried by maintenance")
+    func launchClearFailureIsTrackedSeparately() throws {
+      defer { restoreHistory() }
+      Defaults[.clearOnQuit] = true
+      expiryDefaults.set(1, forKey: HistoryExpiry.preferenceKey)
+      // Left by the last session.
+      _ = historyItem("left, expired", lastCopied: -3)
+      _ = historyItem("left, recent", lastCopied: -0.5)
+      try Storage.shared.save()
+
+      Storage.shared.saveFailureForTesting = InjectedSaveFailure()
+      relaunch()
+      Storage.shared.saveFailureForTesting = nil
+      // One alert, after launch, for everything that failed.
+      #expect(reporter.reports == [[.removal(.clearOnLaunch), .removal(.expiry)]])
+      #expect(Set(history.failingOperations.keys) == [.clearOnLaunch, .expiry])
+
+      // Expiry works again and removes the expired leftover; the clear at
+      // launch is still unresolved.
+      #expect(history.purgeExpiredItems() == 1)
+      #expect(history.failingOperations.keys.sorted() == [.clearOnLaunch])
+      let warning = try #require(StorageSettingsPane.maintenanceFailing(history.failingOperations))
+      #expect(warning.contains(MaintenanceOperation.clearOnLaunch.label))
+      #expect(!warning.contains(MaintenanceOperation.expiry.label))
+      try assertStored(["left, recent"])
+
+      // A copy made in this session is kept when maintenance retries the clear.
+      history.added(historyItem("copied this session", lastCopied: 0))
+      history.runMaintenance()
+      try assertStored(["copied this session"])
+      #expect(history.failingOperations.isEmpty)
+      #expect(StorageSettingsPane.maintenanceFailing(history.failingOperations) == nil)
+      #expect(reporter.reports.count == 1)
+    }
+
+    @Test("The settings warning lists every failing operation")
+    func settingsListFailingOperations() throws {
+      defer { restoreHistory() }
+      let warning = try #require(StorageSettingsPane.maintenanceFailing([
+        .compaction: start, .exportRemoval: start.addingTimeInterval(60), .trim: start
+      ]))
+      for operation in [MaintenanceOperation.compaction, .exportRemoval, .trim] {
+        #expect(warning.contains(operation.label))
+      }
+      #expect(!warning.contains(MaintenanceOperation.expiry.label))
+    }
+
+    // MARK: Launch order
+
+    @Test("Launch runs the storage policy and maintenance before history is loaded, shown or captured")
+    func launchOrder() {
+      defer { restoreHistory() }
+      var steps: [LaunchSequence.Step] = []
+      LaunchSequence { steps.append($0) }.run()
+      #expect(steps == [
+        .applyStoragePolicy, .maintain, .loadHistory, .createInterface, .startCapture,
+        .startMaintenanceSchedule, .presentFailures
+      ])
+    }
+
+    @Test("Failures before and during launch maintenance are shown once, after it; history is not readable before")
+    func launchDefersAlertsAndAccess() async throws {
+      defer { restoreHistory() }
+      Defaults[.clearOnQuit] = true
+      Defaults[.size] = 1
+      _ = historyItem("left by the last session", lastCopied: -2)
+      _ = historyItem("also left", lastCopied: -1)
+      try Storage.shared.save()
+
+      history.beginLaunchForTesting()
+      #expect(!history.prepareForDisplay())
+      await #expect(throws: AppIntentError.notReady) { _ = try await Get().perform() }
+      await #expect(throws: AppIntentError.notReady) { _ = try await Clear().perform() }
+
+      // Saving fails from before the storage-policy step.
+      Storage.shared.saveFailureForTesting = InjectedSaveFailure()
+      var readyBeforeLoad = true
+      var alertsBeforeEnd = -1
+      LaunchSequence { [self] step in
+        switch step {
+        case .applyStoragePolicy:
+          history.beginLaunch()
+          history.enforceStoragePolicy(reloadingItems: false)
+        case .maintain:
+          history.performLaunchMaintenance()
+        case .loadHistory:
+          readyBeforeLoad = history.isReady || history.prepareForDisplay()
+          Storage.shared.saveFailureForTesting = nil
+          history.finishLaunch()
+        case .createInterface, .startCapture, .startMaintenanceSchedule:
+          break
+        case .presentFailures:
+          alertsBeforeEnd = reporter.reports.count
+          history.presentDeferredFailures()
+        }
+      }.run()
+
+      #expect(!readyBeforeLoad)
+      #expect(alertsBeforeEnd == 0)
+      #expect(reporter.reports == [[.removal(.clearOnLaunch), .removal(.trim)]])
+      #expect(history.isReady)
+      #expect(history.prepareForDisplay())
+
+      // Trimming works again on load; the clear is retried by maintenance.
+      history.runMaintenance()
+      try assertStored([])
+      #expect(history.failingOperations.isEmpty)
+    }
+
+    @Test("A history that can't be loaded at launch is reported, not readable, and loads on a retry",
+          arguments: ["popup", "maintenance"])
+    func launchLoadFailure(retry: String) async throws {
+      defer { restoreHistory() }
+      history.added(historyItem("stored before"))
+      try Storage.shared.save()
+
+      Storage.shared.fetchFailureForTesting = InjectedSaveFailure()
+      relaunch()
+      #expect(reporter.reports == [[.load]])
+      // Launch has finished, but history isn't loaded: nothing to show or read.
+      #expect(history.isLaunched)
+      #expect(!history.isLoaded)
+      #expect(!history.isReady)
+      #expect(history.items.isEmpty)
+      // The popup still opens, to show the error and a retry.
+      #expect(history.prepareForDisplay())
+      #expect(history.items.isEmpty)
+
+      // Intents answer "not ready" at once, not "not found".
+      var get = Get()
+      get.selected = false
+      get.number = 1
+      let getFirst = get
+      await #expect(throws: AppIntentError.notReady) { _ = try await getFirst.perform() }
+      get.selected = true
+      let getSelected = get
+      await #expect(throws: AppIntentError.notReady) { _ = try await getSelected.perform() }
+      var select = Select()
+      select.number = 1
+      let selectFirst = select
+      await #expect(throws: AppIntentError.notReady) { _ = try await selectFirst.perform() }
+
+      // A copy is not stored meanwhile: adding one depends on the list.
+      #expect(history.add(historyItem("copied while not loaded")) == nil)
+      try assertStored(["stored before"])
+
+      // Once the store can be read, the retry loads history.
+      Storage.shared.fetchFailureForTesting = nil
+      if retry == "popup" {
+        #expect(history.prepareForDisplay())
+      } else {
+        history.runMaintenance()
+      }
+      #expect(history.isReady)
+      #expect(shownItems().count == 1)
+      #expect(reporter.reports.count == 1)
+      history.added(historyItem("copied after loading"))
+      try assertStored(["stored before", "copied after loading"])
+    }
+
+    // MARK: Refused copies
+
+    @Test("A saved copy the storage settings refuse is removed through the reported path")
+    func refusedSavedCopy() throws {
+      defer { restoreHistory() }
+      let item = historyItem("saved before the setting changed")
+      try Storage.shared.save()
+      Defaults[.enabledPasteboardTypes] = [.png]
+
+      Storage.shared.saveFailureForTesting = InjectedSaveFailure()
+      #expect(!history.insertIntoStorage(item))
+      Storage.shared.saveFailureForTesting = nil
+
+      #expect(reporter.failures == [.refusedByStoragePolicy])
+      #expect(history.failingOperations[.storagePolicyRemoval] != nil)
+      #expect(try Storage.shared.context.fetchCount(FetchDescriptor<HistoryItem>()) == 1)
+
+      history.runMaintenance()
+      #expect(try Storage.shared.context.fetchCount(FetchDescriptor<HistoryItem>()) == 0)
+      #expect(history.failingOperations[.storagePolicyRemoval] == nil)
+      #expect(reporter.failures == [.refusedByStoragePolicy])
+    }
+
+    // MARK: Quit
+
+    @Test("Quitting with clear on quit: what happens for each outcome", arguments: [
+      // clearOnQuit, cleared, sessionEnding, quitAnyway, reply, asked
+      (false, false, false, false, NSApplication.TerminateReply.terminateNow, false),
+      (true, true, false, false, .terminateNow, false),
+      (true, false, true, false, .terminateNow, false),
+      (true, false, false, true, .terminateNow, true),
+      (true, false, false, false, .terminateCancel, true)
+    ])
+    func quitDecision(
+      clearOnQuit: Bool, cleared: Bool, sessionEnding: Bool, quitAnyway: Bool,
+      reply: NSApplication.TerminateReply, asked: Bool
+    ) {
+      defer { restoreHistory() }
+      var clearCalls = 0
+      var askCalls = 0
+      let result = QuitClearDecision.reply(
+        clearOnQuit: clearOnQuit,
+        sessionEnding: sessionEnding,
+        clear: {
+          clearCalls += 1
+          return cleared
+        },
+        quitAnyway: {
+          askCalls += 1
+          return quitAnyway
+        }
+      )
+      #expect(result == reply)
+      #expect(clearCalls == (clearOnQuit ? 1 : 0))
+      #expect(askCalls == (asked ? 1 : 0))
+    }
+
+    @Test("The clear run by the quit dialog doesn't show its own alert")
+    func quitClearDoesNotAlert() throws {
+      defer { restoreHistory() }
+      history.added(historyItem("still stored"))
+      try Storage.shared.save()
+      Storage.shared.saveFailureForTesting = InjectedSaveFailure()
+      #expect(!history.clearOnQuit(alerting: false))
+      Storage.shared.saveFailureForTesting = nil
+      #expect(reporter.reports.isEmpty)
+      try assertStored(["still stored"])
+    }
+
+    @Test("A quit clear that works but leaves an export file opens no dialog and keeps the file pending")
+    func quitClearExportFailureDoesNotAlert() throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      IntentImageExports.directoryForTesting = directory
+      defer {
+        chmod(directory.path, 0o700)
+        IntentImageExports.retryPendingRemovals()
+        try? FileManager.default.removeItem(at: directory)
+      }
+      let owner = history.added(historyItem("export owner"))
+      let export = try IntentImageExports.write(Data("image bytes".utf8), for: owner.item)
+      try Storage.shared.save()
+
+      #expect(chmod(directory.path, 0o500) == 0)
+      #expect(history.clearOnQuit(alerting: false))
+      try assertStored([])
+      #expect(reporter.reports.isEmpty)
+      #expect(FileManager.default.fileExists(atPath: export.path))
+      #expect(IntentImageExports.pendingRemovals.contains(export))
+      #expect(history.failingOperations[.exportRemoval] != nil)
+    }
+
+    @Test("Quitting: a session end skips the dialog; after a cancelled one an ordinary quit asks again", arguments: [
+      "sessionEnding", "sessionEndCancelledThenQuit", "quitCancelledThenQuit", "ordinaryQuit", "inAppQuitAfterNotice"
+    ])
+    func sessionEndDecision(scenario: String) {
+      defer { restoreHistory() }
+      var state = SessionEndState()
+      // Answers a quit request as AppDelegate does, with a clear that fails.
+      func quit(_ request: SessionEndState.QuitRequest, answer: Bool = false) -> (NSApplication.TerminateReply, Bool) {
+        var asked = false
+        let reply = QuitClearDecision.reply(
+          clearOnQuit: true,
+          sessionEnding: state.isSessionEnding(request),
+          clear: { false },
+          quitAnyway: {
+            asked = true
+            return answer
+          }
+        )
+        state.quitAnswered(reply)
+        return (reply, asked)
+      }
+      func expectQuit(
+        _ result: (NSApplication.TerminateReply, Bool), _ reply: NSApplication.TerminateReply, asked: Bool,
+        sourceLocation: SourceLocation = #_sourceLocation
+      ) {
+        #expect(result.0 == reply, sourceLocation: sourceLocation)
+        #expect(result.1 == asked, sourceLocation: sourceLocation)
+      }
+
+      switch scenario {
+      case "sessionEnding":
+        // Logging out: the quit event says so, or the power-off notice came first.
+        expectQuit(quit(.appleEvent(sessionEnding: true)), .terminateNow, asked: false)
+        state.noticePowerOff()
+        expectQuit(quit(.appleEvent(sessionEnding: false)), .terminateNow, asked: false)
+      case "sessionEndCancelledThenQuit":
+        // A logout is announced, then cancelled; Maccy becomes active again.
+        state.noticePowerOff()
+        state.sessionContinues()
+        expectQuit(quit(.appleEvent(sessionEnding: false)), .terminateCancel, asked: true)
+      case "quitCancelledThenQuit":
+        // The notice arrives while the dialog is open; the user cancels.
+        state.noticePowerOff()
+        let reply = QuitClearDecision.reply(
+          clearOnQuit: true, sessionEnding: false, clear: { false }, quitAnyway: { false }
+        )
+        state.quitAnswered(reply)
+        #expect(reply == .terminateCancel)
+        expectQuit(quit(.appleEvent(sessionEnding: false)), .terminateCancel, asked: true)
+      case "ordinaryQuit":
+        expectQuit(quit(.appleEvent(sessionEnding: false)), .terminateCancel, asked: true)
+        expectQuit(quit(.inApp, answer: true), .terminateNow, asked: true)
+      default:
+        // Quit from Maccy's own menu: the user is there to answer.
+        state.noticePowerOff()
+        expectQuit(quit(.inApp), .terminateCancel, asked: true)
+      }
+    }
+
+    // MARK: Expiry at the point of access
+
+    @Test("Expiry runs before history is shown when due, and not again straight away")
+    func expiryBeforeDisplay() throws {
+      defer { restoreHistory() }
+      expiryDefaults.set(1, forKey: HistoryExpiry.preferenceKey)
+      history.added(historyItem("expired", lastCopied: -2))
+      let fresh = history.added(historyItem("fresh", lastCopied: 0))
+      try Storage.shared.save()
+
+      #expect(history.prepareForDisplay())
+      #expect(shownItems() == [fresh.item])
+
+      clock.advance(by: 10)
+      history.added(historyItem("expired too", lastCopied: -3))
+      #expect(history.prepareForDisplay())
+      #expect(shownItems().count == 2)
+
+      clock.advance(by: History.expiryAccessInterval)
+      #expect(history.prepareForDisplay())
+      #expect(shownItems() == [fresh.item])
+    }
+
+    @Test("The Get and Select intents purge expired items before reading", arguments: ["get", "select"])
+    func intentsExpireBeforeReading(intent: String) async throws {
+      defer { restoreHistory() }
+      expiryDefaults.set(1, forKey: HistoryExpiry.preferenceKey)
+      history.added(historyItem("expired", lastCopied: -3))
+      history.added(historyItem("fresh", lastCopied: 0))
+      try Storage.shared.save()
+      #expect(history.items.count == 2)
+
+      if intent == "get" {
+        var get = Get()
+        get.selected = false
+        get.number = 2
+        let second = get
+        await #expect(throws: AppIntentError.notFound) { _ = try await second.perform() }
+      } else {
+        var select = Select()
+        select.number = 2
+        let second = select
+        await #expect(throws: AppIntentError.notFound) { _ = try await second.perform() }
+      }
+      #expect(history.items.count == 1)
+      try assertStored(["fresh"])
+    }
+
+    @Test("A re-dated item takes its place in the list at once, and is re-dated only once")
+    func redatingOrderAndOnce() throws {
+      defer { restoreHistory() }
+      expiryDefaults.set(24, forKey: HistoryExpiry.preferenceKey)
+      let older = history.added(historyItem("an hour old", lastCopied: -1))
+      let ahead = history.added(historyItem("five minutes ahead", lastCopied: 5.0 / 60))
+      let future = history.added(historyItem("a month ahead", lastCopied: 24 * 30))
+      try Storage.shared.save()
+      #expect(shownItems() == [future.item, ahead.item, older.item])
+
+      #expect(history.purgeExpiredItems() == 0)
+      #expect(future.item.lastCopiedAt == start)
+      // Sorted by last copy: now below the item still slightly ahead.
+      #expect(shownItems() == [ahead.item, future.item, older.item])
+
+      // The clock goes back a month again: the re-dated item is ahead once
+      // more. It is not re-dated a second time but expires.
+      clock.now = start.addingTimeInterval(-24 * 30 * 3600)
+      let newlyAhead = history.added(historyItem("ahead for the first time", lastCopied: 0))
+      try Storage.shared.save()
+      #expect(history.purgeExpiredItems() == 1)
+      #expect(!shownItems().contains(future.item))
+      #expect(newlyAhead.item.lastCopiedAt == clock.now)
+    }
+
+    // MARK: Compaction failures
+
+    @Test("A compaction blocked by a reader is retried with a delay and succeeds without another deletion",
+          arguments: ["clear", "clearAll", "clearOnLaunch", "expiry"])
+    func compactionRecoversAfterFailure(path: String) async throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      let url = directory.appending(path: "Storage.sqlite")
+      let previous = Storage.replaceSharedForTesting(with: Storage(storeURL: url))
+      var failure: (any Error)?
+      do {
+        try await failThenRecover(path: path, directory: directory, url: url)
+      } catch {
+        failure = error
+      }
+      await history.waitForCompaction()
+      Storage.shared.saveFailureForTesting = nil
+      history.clearAll()
+      await history.waitForCompaction()
+      Storage.replaceSharedForTesting(with: previous)
+      try await history.load()
+      try? FileManager.default.removeItem(at: directory)
+      if let failure {
+        throw failure
+      }
+    }
+
+    private func failThenRecover(path: String, directory: URL, url: URL) async throws {
+      try await history.load()
+      let secret = "A6-BUSY-MARKER-\(UUID().uuidString)"
+      expiryDefaults.set(path == "expiry" ? 1 : 0, forKey: HistoryExpiry.preferenceKey)
+      let pinned = history.added(historyItem("pinned", lastCopied: 0))
+      history.togglePin(pinned)
+      for index in 0..<3 {
+        history.added(historyItem("\(secret)-\(index)", lastCopied: -2))
+      }
+      try Storage.shared.save()
+
+      // Another connection keeps a read transaction open: the WAL can't be
+      // truncated.
+      var reader: OpaquePointer?
+      #expect(sqlite3_open_v2(url.path, &reader, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+      defer { sqlite3_close_v2(reader) }
+      #expect(sqlite3_exec(reader, "BEGIN; SELECT count(*) FROM sqlite_master;", nil, nil, nil) == SQLITE_OK)
+
+      switch path {
+      case "clear": #expect(history.clear())
+      case "clearAll": #expect(history.clearAll())
+      case "clearOnLaunch":
+        Defaults[.clearOnQuit] = true
+        relaunch()
+      default:
+        history.runExpiry()
+      }
+      await history.waitForCompaction()
+
+      // History was removed; compaction failed and stays pending.
+      #expect(try Storage.shared.allItems().allSatisfy { $0.pin != nil })
+      #expect(history.isCompactionPending)
+      #expect(history.failingOperations[.compaction] != nil)
+      #expect(reporter.reports.isEmpty)
+
+      // Not retried before the delay.
+      history.runMaintenance()
+      #expect(history.compactionTask == nil)
+
+      // The reader goes away; after the delay maintenance compacts.
+      #expect(sqlite3_exec(reader, "COMMIT", nil, nil, nil) == SQLITE_OK)
+      clock.advance(by: History.compactionRetryDelay + 1)
+      Defaults[.clearOnQuit] = false
+      history.runMaintenance()
+      await history.waitForCompaction()
+
+      #expect(!history.isCompactionPending)
+      #expect(history.failingOperations[.compaction] == nil)
+      #expect(try filesContaining(secret, in: directory).isEmpty)
+      try assertNoSidecarFiles(in: directory)
+    }
+
+    @Test("A save during a compaction interrupts it; the save succeeds and compaction runs again")
+    func saveInterruptsCompaction() async throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      let url = directory.appending(path: "Storage.sqlite")
+      let previous = Storage.replaceSharedForTesting(with: Storage(storeURL: url))
+      var failure: (any Error)?
+      do {
+        try await history.load()
+        let secret = "A6-INTERRUPT-MARKER-\(UUID().uuidString)"
+        for index in 0..<3 {
+          history.added(historyItem("\(secret)-\(index)"))
+        }
+        try Storage.shared.save()
+        // Blocks the compaction so it is still running when the save comes.
+        var reader: OpaquePointer?
+        #expect(sqlite3_open_v2(url.path, &reader, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+        #expect(sqlite3_exec(reader, "BEGIN; SELECT count(*) FROM sqlite_master;", nil, nil, nil) == SQLITE_OK)
+        #expect(history.clear())
+        for _ in 0..<200 where !Storage.shared.isCompacting {
+          try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(Storage.shared.isCompacting)
+
+        history.added(historyItem("saved during compaction"))
+        try Storage.shared.save()
+        #expect(!Storage.shared.isCompacting)
+        await history.waitForCompaction()
+        sqlite3_exec(reader, "COMMIT", nil, nil, nil)
+        sqlite3_close_v2(reader)
+
+        // Interrupted, not failed; runs again shortly.
+        #expect(history.failingOperations[.compaction] == nil)
+        #expect(history.isCompactionPending)
+        clock.advance(by: History.compactionResumeDelay + 1)
+        history.runMaintenance()
+        await history.waitForCompaction()
+        #expect(!history.isCompactionPending)
+        #expect(try filesContaining(secret, in: directory).isEmpty)
+        let reopened = Storage(storeURL: url)
+        #expect(try reopened.allItems().count == 1)
+        withExtendedLifetime(reopened) {}
+      } catch {
+        failure = error
+      }
+      await history.waitForCompaction()
+      history.clearAll()
+      await history.waitForCompaction()
+      Storage.replaceSharedForTesting(with: previous)
+      try await history.load()
+      try? FileManager.default.removeItem(at: directory)
+      if let failure {
+        throw failure
+      }
+    }
+
+    @Test("A save during the rebuild or the copy back stops the compaction at once; the store is intact and it runs again",
+          arguments: [StorageCompaction.Phase.rebuilding, .copyingBack])
+    func saveStopsActiveCompaction(phase: StorageCompaction.Phase) async throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      let url = directory.appending(path: "Storage.sqlite")
+      let previous = Storage.replaceSharedForTesting(with: Storage(storeURL: url))
+      var failure: (any Error)?
+      do {
+        try await interruptActiveCompaction(at: phase, directory: directory, url: url)
+      } catch {
+        failure = error
+      }
+      Storage.shared.compactionPhaseHandlerForTesting = nil
+      await history.waitForCompaction()
+      history.clearAll()
+      await history.waitForCompaction()
+      Storage.replaceSharedForTesting(with: previous)
+      try await history.load()
+      try? FileManager.default.removeItem(at: directory)
+      if let failure {
+        throw failure
+      }
+    }
+
+    private func interruptActiveCompaction(at phase: StorageCompaction.Phase, directory: URL, url: URL) async throws {
+      try await history.load()
+      let secret = "A6-ACTIVE-MARKER-\(UUID().uuidString)"
+      // Kept, and large enough (2 MB) that copying the store back takes
+      // several steps.
+      var kept = "A6-KEPT-\(UUID().uuidString)"
+      while kept.utf8.count < 2 * 1024 * 1024 {
+        kept += UUID().uuidString
+      }
+      let pinned = history.added(historyItem(kept))
+      history.togglePin(pinned)
+      for index in 0..<5 {
+        history.added(historyItem("\(secret)-\(index)"))
+      }
+      try Storage.shared.save()
+
+      // The compaction waits in `phase` until it is cancelled.
+      let reached = SharedFlag()
+      Storage.shared.compactionPhaseHandlerForTesting = { job, current in
+        guard current == phase else {
+          return
+        }
+        reached.raise()
+        let deadline = ProcessInfo.processInfo.systemUptime + 10
+        while !job.isCancelled, ProcessInfo.processInfo.systemUptime < deadline {
+          usleep(1000)
+        }
+      }
+      #expect(history.clear())
+      for _ in 0..<2000 where !reached.isRaised {
+        try await Task.sleep(for: .milliseconds(5))
+      }
+      try #require(reached.isRaised)
+      #expect(Storage.shared.isCompacting)
+
+      // A copy is saved while the compaction is under way: it stops it and
+      // doesn't wait for it.
+      let clock = ContinuousClock()
+      let before = clock.now
+      history.added(historyItem("saved during compaction"))
+      #expect(clock.now - before < .seconds(1))
+      #expect(!Storage.shared.isCompacting)
+      await history.waitForCompaction()
+      Storage.shared.compactionPhaseHandlerForTesting = nil
+
+      // Interrupted, not failed; still pending, here and for the next launch.
+      #expect(history.failingOperations[.compaction] == nil)
+      #expect(history.isCompactionPending)
+      #expect(expiryDefaults.bool(forKey: History.compactionPendingKey))
+      // The store is intact: what was kept and the new copy, nothing more.
+      #expect(try integrityCheck(of: url) == "ok")
+      try assertNoSidecarFiles(in: directory)
+      let reopened = Storage(storeURL: url)
+      let values = Set(try reopened.allItems().compactMap { $0.contents.first?.value })
+      #expect(values == [Data(kept.utf8), Data("saved during compaction".utf8)])
+
+      // It runs again later, and then succeeds.
+      self.clock.advance(by: History.compactionResumeDelay + 1)
+      history.runMaintenance()
+      await history.waitForCompaction()
+      #expect(!history.isCompactionPending)
+      #expect(!expiryDefaults.bool(forKey: History.compactionPendingKey))
+      #expect(try filesContaining(secret, in: directory).isEmpty)
+      try assertNoSidecarFiles(in: directory)
+      withExtendedLifetime(reopened) {}
+    }
+
+    @Test("Clearing compacts at once; other removals at most once an hour; a pending one runs before capture at launch")
+    func compactionScheduling() async throws {
+      defer { restoreHistory() }
+      let directory = try temporaryDirectory()
+      let url = directory.appending(path: "Storage.sqlite")
+      let previous = Storage.replaceSharedForTesting(with: Storage(storeURL: url))
+      var failure: (any Error)?
+      do {
+        try await checkCompactionScheduling(directory: directory)
+      } catch {
+        failure = error
+      }
+      await history.waitForCompaction()
+      history.clearAll()
+      await history.waitForCompaction()
+      Storage.replaceSharedForTesting(with: previous)
+      try await history.load()
+      try? FileManager.default.removeItem(at: directory)
+      if let failure {
+        throw failure
+      }
+    }
+
+    private func checkCompactionScheduling(directory: URL) async throws {
+      try await history.load()
+      let markers = (0..<3).map { "A6-SCHEDULE-MARKER-\($0)-\(UUID().uuidString)" }
+      let first = history.added(historyItem(markers[0]))
+      let second = history.added(historyItem(markers[1]))
+      let third = history.added(historyItem(markers[2]))
+      try Storage.shared.save()
+
+      // The first deletion compacts straight away: none ran before.
+      #expect(history.delete(first))
+      await history.waitForCompaction()
+      #expect(!history.isCompactionPending)
+      #expect(try filesContaining(markers[0], in: directory).isEmpty)
+
+      // Another one within the hour waits, through maintenance too.
+      clock.advance(by: 60)
+      #expect(history.delete(second))
+      #expect(history.isCompactionPending)
+      #expect(history.compactionTask == nil)
+      clock.advance(by: History.compactionInterval / 2)
+      history.runMaintenance()
+      #expect(history.compactionTask == nil)
+
+      // A pending compaction runs at launch, before capture starts.
+      relaunch()
+      #expect(history.isCompactionPending)
+      let captureStarted = SharedFlag()
+      history.afterLaunchCompaction { captureStarted.raise() }
+      #expect(!captureStarted.isRaised)
+      #expect(history.compactionTask != nil)
+      await history.waitForCompaction()
+      for _ in 0..<200 where !captureStarted.isRaised {
+        try await Task.sleep(for: .milliseconds(5))
+      }
+      #expect(captureStarted.isRaised)
+      #expect(!history.isCompactionPending)
+      #expect(try filesContaining(markers[1], in: directory).isEmpty)
+
+      // A deletion now waits for the hour; a clear doesn't.
+      #expect(history.delete(third))
+      #expect(history.isCompactionPending)
+      #expect(history.compactionTask == nil)
+      #expect(history.clear())
+      #expect(history.compactionTask != nil)
+      await history.waitForCompaction()
+      #expect(!history.isCompactionPending)
+      #expect(try filesContaining(markers[2], in: directory).isEmpty)
+
+      // With nothing pending, capture starts at once.
+      let startedAtOnce = SharedFlag()
+      history.afterLaunchCompaction { startedAtOnce.raise() }
+      #expect(startedAtOnce.isRaised)
     }
 
     // MARK: Helpers
+
+    // Deletes, through `database`, every row of every table with `marker` in
+    // any column. Returns how many rows it deleted.
+    private func deleteRows(containing marker: String, in database: OpaquePointer) throws -> Int {
+      func strings(_ sql: String, column: Int32) throws -> [String] {
+        var statement: OpaquePointer?
+        try #require(sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        var values: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+          values.append(String(cString: sqlite3_column_text(statement, column)))
+        }
+        return values
+      }
+      var deleted = 0
+      for table in try strings("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'", column: 0) {
+        for column in try strings("PRAGMA table_info(\"\(table)\")", column: 1) {
+          var statement: OpaquePointer?
+          let sql = "DELETE FROM \"\(table)\" WHERE instr(CAST(\"\(column)\" AS BLOB), CAST(? AS BLOB)) > 0"
+          try #require(sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK)
+          sqlite3_bind_text(statement, 1, marker, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+          let stepped = sqlite3_step(statement)
+          sqlite3_finalize(statement)
+          try #require(stepped == SQLITE_DONE)
+          deleted += Int(sqlite3_changes(database))
+        }
+      }
+      return deleted
+    }
+
+    private func integrityCheck(of url: URL) throws -> String {
+      var database: OpaquePointer?
+      defer { sqlite3_close_v2(database) }
+      try #require(sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+      var statement: OpaquePointer?
+      defer { sqlite3_finalize(statement) }
+      try #require(sqlite3_prepare_v2(database, "PRAGMA integrity_check", -1, &statement, nil) == SQLITE_OK)
+      try #require(sqlite3_step(statement) == SQLITE_ROW)
+      return String(cString: sqlite3_column_text(statement, 0))
+    }
 
     // The items shown, in order. Compared by item, since loading history
     // rebuilds the decorators.
@@ -641,9 +1590,92 @@ extension SharedStateTests {
       return directory
     }
 
-    private func contains(_ url: URL, _ marker: String) -> Bool {
-      guard let data = try? Data(contentsOf: url) else { return false }
-      return data.range(of: Data(marker.utf8)) != nil
+    // Every file under `directory` (hidden ones included) whose bytes contain
+    // `marker`. A file that can't be read fails the test rather than counting
+    // as clean.
+    private func filesContaining(_ marker: String, in directory: URL) throws -> [String] {
+      try filesContaining(Data(marker.utf8), in: directory)
+    }
+
+    private func filesContaining(_ marker: Data, in directory: URL) throws -> [String] {
+      let enumerator = try #require(FileManager.default.enumerator(
+        at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [],
+        errorHandler: { url, error in
+          Issue.record("Could not list \(url.lastPathComponent): \(error)")
+          return true
+        }
+      ))
+      var hits: [String] = []
+      for case let file as URL in enumerator
+      where try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+        let data = try Data(contentsOf: file, options: .alwaysMapped)
+        if data.range(of: marker) != nil {
+          hits.append(file.lastPathComponent)
+        }
+      }
+      return hits
+    }
+
+    // Only the store and SQLite's own sidecar files, no directories: no
+    // external-storage blobs (`.Storage_SUPPORT`) that could keep deleted
+    // content.
+    private func assertNoSidecarFiles(in directory: URL, sourceLocation: SourceLocation = #_sourceLocation) throws {
+      let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+      #expect(Set(files).isSubset(of: ["Storage.sqlite", "Storage.sqlite-wal", "Storage.sqlite-shm"]),
+              "\(files)", sourceLocation: sourceLocation)
+      #expect(!files.contains(".Storage_SUPPORT"), sourceLocation: sourceLocation)
+    }
+
+    // Short text items, a real PNG image and a multi-megabyte text payload,
+    // all unpinned and last copied two hours ago. Returns markers found in
+    // their stored bytes.
+    private func addRemovableContent(secret: String) throws -> [Data] {
+      for index in 0..<5 {
+        history.added(historyItem("\(secret)-\(index)", lastCopied: -2))
+      }
+
+      let png = try noisePNG(width: 800, height: 800)
+      let image = HistoryItem()
+      Storage.shared.context.insert(image)
+      image.contents = [HistoryItemContent(type: NSPasteboard.PasteboardType.png.rawValue, value: png)]
+      image.numberOfCopies = 1
+      image.lastCopiedAt = start.addingTimeInterval(-2 * 3600)
+      image.firstCopiedAt = image.lastCopiedAt
+      image.regenerateTitle()
+      history.added(image)
+      // A slice of the image's random pixels is as unique as a marker.
+      let imageMarker = png.subdata(in: (png.count / 2)..<(png.count / 2 + 48))
+
+      let bigMarker = "A6-BIG-MARKER-\(UUID().uuidString)"
+      var big = bigMarker
+      while big.utf8.count < 3 * 1024 * 1024 {
+        big += UUID().uuidString
+      }
+      big += bigMarker
+      history.added(historyItem(big, lastCopied: -2))
+
+      return [Data(bigMarker.utf8), imageMarker]
+    }
+
+    private func noisePNG(width: Int, height: Int) throws -> Data {
+      let rep = try #require(NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32
+      ))
+      let pixels = try #require(rep.bitmapData)
+      for index in 0..<(width * height * 4) {
+        pixels[index] = UInt8.random(in: 0...255)
+      }
+      return try #require(rep.representation(using: .png, properties: [:]))
+    }
+
+    // Replays a launch: maintenance, load, then the failures collected.
+    private func relaunch() {
+      history.beginLaunchForTesting()
+      history.beginLaunch()
+      history.performLaunchMaintenance()
+      history.finishLaunch()
+      history.presentDeferredFailures()
     }
   }
 }

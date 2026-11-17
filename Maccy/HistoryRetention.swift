@@ -35,12 +35,17 @@ nonisolated enum HistorySize {
 //
 // How the stored value is read (including a value forced by a profile):
 // - absent, or 0: off;
-// - a positive number, or a string holding one: that many hours, rounded down,
-//   at least 1 and at most `maximumHours`;
-// - anything else (negative, not a number, a Boolean, a list, ...): invalid.
+// - a number of any numeric type (integer or real), or a string holding a
+//   decimal number (surrounding whitespace ignored), greater than 0: that many
+//   hours, rounded down, at least 1 and at most `maximumHours`. So 0.5 and
+//   "0.5" mean 1 hour, 36.9 means 36, and 1e300 means `maximumHours`;
+// - anything else is invalid: a negative number (or a string holding one), a
+//   string that isn't a number (the empty string included), NaN, a Boolean, a
+//   list, a dictionary, a date or data.
 //   An invalid value fails closed: it is treated as the shortest expiry,
 //   `invalidValueHours`, because it may be an administrator's retention limit
-//   written wrongly, and must not silently turn expiry off.
+//   written wrongly, and must not silently turn expiry off. An invalid value
+//   forced by a profile therefore removes pinned items not copied for an hour.
 //
 // Pinned items expire only while the value is forced by a configuration
 // profile: an administrator's retention limit must not be bypassed by pinning.
@@ -129,16 +134,34 @@ nonisolated enum HistoryRemoval: String, Sendable {
   case clearOnLaunch
   case trim
   case expiry
+  // A copy the storage settings refuse, after it was already saved.
+  case refusedByStoragePolicy
 
   // Removals the user asked for are reported every time they fail. Automatic
-  // ones (trimming to the history size, expiry, and the clear-on-quit run at
-  // launch) run from timers and on every copy, so a store that keeps failing
-  // would show an alert each time: they show one alert per run of failures
-  // (until one succeeds), and are logged and shown in the Storage settings.
-  var alertsEveryTime: Bool {
+  // ones (trimming to the history size, expiry, the clear-on-quit run at
+  // launch, a refused copy) run from timers and on every copy, so a store that
+  // keeps failing would show an alert each time: each is tracked as its own
+  // `MaintenanceOperation`, shows one alert per run of failures (until that
+  // operation succeeds), and is logged and listed in the Storage settings.
+  var alertsEveryTime: Bool { maintenanceOperation == nil }
+
+  // Whether the store is compacted straight after it (see
+  // `History.requestCompaction`). Clearing leaves a small store, which is
+  // quick to rebuild; after other removals compaction is coalesced.
+  var compactsPromptly: Bool {
     switch self {
-    case .delete, .clear, .clearAll, .clearOnQuit: true
-    case .clearOnLaunch, .trim, .expiry: false
+    case .clear, .clearAll, .clearOnQuit, .clearOnLaunch: true
+    case .delete, .trim, .expiry, .refusedByStoragePolicy: false
+    }
+  }
+
+  var maintenanceOperation: MaintenanceOperation? {
+    switch self {
+    case .delete, .clear, .clearAll, .clearOnQuit: nil
+    case .clearOnLaunch: .clearOnLaunch
+    case .trim: .trim
+    case .expiry: .expiry
+    case .refusedByStoragePolicy: .storagePolicyRemoval
     }
   }
 
@@ -156,6 +179,8 @@ nonisolated enum HistoryRemoval: String, Sendable {
       Self.localized("RemovalFailedTrimTitle", "Old items were NOT removed")
     case .expiry:
       Self.localized("RemovalFailedExpiryTitle", "Expired items were NOT removed")
+    case .refusedByStoragePolicy:
+      Self.localized("RemovalFailedRefusedTitle", "A copy was NOT removed")
     }
   }
 
@@ -182,8 +207,9 @@ nonisolated enum HistoryRemoval: String, Sendable {
     case .clearOnLaunch:
       Self.localized(
         "RemovalFailedClearOnLaunchMessage",
-        "History was set to be cleared when Maccy quits, but Maccy could not delete it from its database. " +
-          "Every item is still stored. Use Clear in the Maccy window to try again."
+        "History was set to be cleared when Maccy quits, but Maccy could not delete what the last session " +
+          "left from its database. Those items are still stored. Maccy keeps trying every few minutes; you " +
+          "can also use Clear in the Maccy window."
       )
     case .trim:
       Self.localized(
@@ -197,14 +223,111 @@ nonisolated enum HistoryRemoval: String, Sendable {
         "Maccy could not remove items older than the expiry time from its database. They are still stored. " +
           "Maccy will keep trying; this alert is not shown again until removal works."
       )
+    case .refusedByStoragePolicy:
+      Self.localized(
+        "RemovalFailedRefusedMessage",
+        "Maccy could not remove a copy that the storage settings do not allow from its database. It is still " +
+          "stored, but not shown. Maccy will keep trying; this alert is not shown again until removal works."
+      )
     }
   }
 }
 
-// Tells the user that a removal failed. Tests replace it.
+// Automatic work whose failures are tracked separately, so one operation
+// succeeding can't hide that another is still failing. Each is retried by the
+// periodic maintenance (`History.runMaintenance`) and resolved only when it
+// succeeds.
+nonisolated enum MaintenanceOperation: String, CaseIterable, Sendable, Comparable {
+  case clearOnLaunch
+  case trim
+  case expiry
+  case storagePolicyRemoval
+  case exportRemoval
+  case compaction
+
+  static func < (lhs: Self, rhs: Self) -> Bool {
+    allCases.firstIndex(of: lhs)! < allCases.firstIndex(of: rhs)!
+  }
+
+  private static func localized(_ key: String, _ value: String) -> String {
+    NSLocalizedString(key, tableName: "StorageSettings", value: value, comment: "")
+  }
+
+  // Names the operation in the Storage settings warning.
+  var label: String {
+    switch self {
+    case .clearOnLaunch:
+      Self.localized("OperationClearOnLaunch", "clearing history left from the last session")
+    case .trim:
+      Self.localized("OperationTrim", "removing items beyond the history size")
+    case .expiry:
+      Self.localized("OperationExpiry", "removing expired items")
+    case .storagePolicyRemoval:
+      Self.localized("OperationStoragePolicy", "removing a copy the storage settings do not allow")
+    case .exportRemoval:
+      Self.localized("OperationExportRemoval", "deleting image files handed to Shortcuts")
+    case .compaction:
+      Self.localized("OperationCompaction", "compacting the history database")
+    }
+  }
+}
+
+// Something the user is told about. Never carries clipboard content or a file
+// name derived from it.
+nonisolated enum HistoryFailure: Equatable, Sendable {
+  // A removal failed: nothing was removed.
+  case removal(HistoryRemoval)
+  // History was removed, but an image file exported to Shortcuts for it could
+  // not be deleted. Maccy keeps the path and tries again.
+  case exportRemoval
+  // History could not be read at launch.
+  case load
+
+  private static func localized(_ key: String, _ value: String) -> String {
+    NSLocalizedString(key, tableName: "StorageSettings", value: value, comment: "")
+  }
+
+  // The popup's button that tries loading history again.
+  static var loadRetryButton: String { localized("LoadRetry", "Try Again") }
+
+  var title: String {
+    switch self {
+    case .removal(let removal):
+      removal.failureTitle
+    case .exportRemoval:
+      Self.localized("ExportRemovalFailedTitle", "An exported image file was NOT deleted")
+    case .load:
+      Self.localized("LoadFailedTitle", "History could not be loaded")
+    }
+  }
+
+  var message: String {
+    switch self {
+    case .removal(let removal):
+      removal.failureMessage
+    case .exportRemoval:
+      Self.localized(
+        "ExportRemovalFailedMessage",
+        "History was deleted, but an image file Maccy exported for Shortcuts could not be removed and can " +
+          "still be read on this Mac. Maccy will keep trying to delete it."
+      )
+    case .load:
+      Self.localized(
+        "LoadFailedMessage",
+        "Maccy could not read its history database, so history is not shown and new copies are not saved. " +
+          "Stored items have not been removed. Maccy tries again every few minutes and when you open it. " +
+          "If this keeps happening, quit and reopen Maccy."
+      )
+    }
+  }
+}
+
+// Tells the user about failures. Tests replace it.
 @MainActor
 protocol HistoryRemovalFailureReporting: AnyObject {
-  func removalFailed(_ removal: HistoryRemoval, error: any Error)
+  // One alert for every failure given. `errorCode` is a redacted error domain
+  // and code only.
+  func report(_ failures: [HistoryFailure], errorCode: String?)
 }
 
 // Shows a modal alert with the operation and the error's domain and code only:
@@ -213,10 +336,11 @@ protocol HistoryRemovalFailureReporting: AnyObject {
 final class AlertHistoryRemovalFailureReporter: HistoryRemovalFailureReporting {
   private var isPresenting = false
 
-  func removalFailed(_ removal: HistoryRemoval, error: any Error) {
+  func report(_ failures: [HistoryFailure], errorCode: String?) {
     #if DEBUG
     guard !History.isRunningUnitTests else { return }
     #endif
+    guard let first = failures.first else { return }
     // One alert at a time; a failure while one is open is only logged.
     guard !isPresenting else { return }
     isPresenting = true
@@ -224,9 +348,127 @@ final class AlertHistoryRemovalFailureReporter: HistoryRemovalFailureReporting {
 
     let alert = NSAlert()
     alert.alertStyle = .critical
-    alert.messageText = removal.failureTitle
-    alert.informativeText = removal.failureMessage + "\n\n" + Notifier.redacted(error)
+    if failures.count == 1 {
+      alert.messageText = first.title
+      alert.informativeText = first.message
+    } else {
+      alert.messageText = NSLocalizedString(
+        "SeveralFailuresTitle", tableName: "StorageSettings", value: "Maccy could not finish its history upkeep",
+        comment: ""
+      )
+      alert.informativeText = failures.map { "\($0.title)\n\($0.message)" }.joined(separator: "\n\n")
+    }
+    if let errorCode {
+      alert.informativeText += "\n\n" + errorCode
+    }
     NSApp.activate()
     alert.runModal()
+  }
+}
+
+// What to answer when Maccy is asked to quit with "Clear history on quit" on.
+// The clear runs first. If it fails, the user decides, unless the session is
+// ending (log out, restart, shut down): then Maccy does not hold the session
+// open waiting for a dialog; the failure is logged and the clear at the next
+// launch is the safety net.
+@MainActor
+enum QuitClearDecision {
+  static func reply(
+    clearOnQuit: Bool,
+    sessionEnding: Bool,
+    clear: () -> Bool,
+    quitAnyway: () -> Bool
+  ) -> NSApplication.TerminateReply {
+    guard clearOnQuit, !clear() else {
+      return .terminateNow
+    }
+    if sessionEnding {
+      return .terminateNow
+    }
+    return quitAnyway() ? .terminateNow : .terminateCancel
+  }
+
+  private static func localized(_ key: String, _ value: String) -> String {
+    NSLocalizedString(key, tableName: "StorageSettings", value: value, comment: "")
+  }
+
+  static var title: String { localized("QuitClearFailedTitle", "History was NOT cleared") }
+  static var message: String {
+    localized(
+      "QuitClearFailedMessage",
+      "Maccy could not delete history from its database, so every item is still stored. If you quit anyway, " +
+        "Maccy tries again the next time it opens. Cancel keeps Maccy open so you can try again."
+    )
+  }
+  static var quitAnywayButton: String { localized("QuitAnyway", "Quit Anyway") }
+  static var cancelButton: String { localized("QuitCancel", "Cancel") }
+}
+
+// Whether a quit request comes from the session ending (log out, restart,
+// shut down), when Maccy must not hold the session open with a dialog.
+//
+// The quit Apple event of a session end says so (`kAEQuitReason`). As a
+// fallback, `NSWorkspace.willPowerOffNotification` is remembered, but a
+// session end can be cancelled (by the user, or by another app refusing to
+// quit), and Maccy keeps running. So the notice is forgotten when a quit is
+// cancelled or Maccy becomes active again, and it never applies to a quit
+// asked for in Maccy itself (no Apple event): the user is there to answer.
+@MainActor
+struct SessionEndState {
+  enum QuitRequest: Equatable {
+    // A quit Apple event; `sessionEnding` if its reason is a session end.
+    case appleEvent(sessionEnding: Bool)
+    // From Maccy's own interface.
+    case inApp
+  }
+
+  private(set) var powerOffNoticed = false
+
+  mutating func noticePowerOff() {
+    powerOffNoticed = true
+  }
+
+  // A quit was cancelled, or Maccy became active again: the session goes on.
+  mutating func sessionContinues() {
+    powerOffNoticed = false
+  }
+
+  // After answering a quit request: one that was cancelled means the session
+  // goes on.
+  mutating func quitAnswered(_ reply: NSApplication.TerminateReply) {
+    if reply == .terminateCancel {
+      sessionContinues()
+    }
+  }
+
+  func isSessionEnding(_ request: QuitRequest) -> Bool {
+    switch request {
+    case .appleEvent(let sessionEnding): sessionEnding || powerOffNoticed
+    case .inApp: false
+    }
+  }
+}
+
+// The launch, in order. Nothing that reads or shows history runs before the
+// storage-policy clean-up and the launch maintenance (clear at launch, expiry,
+// trim) have finished, and failures found on the way are shown once at the
+// end, so no modal alert's event loop can expose history that should already
+// be gone.
+@MainActor
+struct LaunchSequence {
+  enum Step: String, CaseIterable, Sendable {
+    case applyStoragePolicy
+    case maintain
+    case loadHistory
+    case createInterface
+    case startCapture
+    case startMaintenanceSchedule
+    case presentFailures
+  }
+
+  let perform: (Step) -> Void
+
+  func run() {
+    Step.allCases.forEach(perform)
   }
 }

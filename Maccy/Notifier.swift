@@ -138,6 +138,28 @@ class Notifier {
     }
   }
 
+  /// Fixed identifier for the "copy too large" notification: a later one replaces it.
+  static let copyTooLargeIdentifier = "copy-too-large"
+
+  /// Fixed text, never derived from the copy: says only that a copy was not saved.
+  nonisolated static var copyTooLargeBody: String {
+    NSLocalizedString("notification_copy_too_large_body", value: "A copy was too large to save", comment: "")
+  }
+
+  /// Tells the user a copy was not saved because it was over a size limit
+  /// (see ContentLimits), through the same permission check as other
+  /// notifications: only when Maccy may post alerts. It never asks for
+  /// permission itself.
+  static func notifyCopyTooLarge() {
+    client.permissions { authorized, alertEnabled, _ in
+      guard authorized, alertEnabled else { return }
+      let content = UNMutableNotificationContent()
+      content.body = copyTooLargeBody
+      let request = UNNotificationRequest(identifier: copyTooLargeIdentifier, content: content, trigger: nil)
+      client.add(request) { _ in }
+    }
+  }
+
   static func removeDelivered(for item: HistoryItem) {
     let identifier = identifier(for: item)
     active.remove(identifier)

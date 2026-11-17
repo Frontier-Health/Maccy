@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and unit tests (macOS)
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      # Read by Maccy.xctestplan ($(CI)) and MaccyUITests.
+      CI: "true"
+      XCODE_APP: /Applications/Xcode_26.4.app
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+          swift --version
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Maccy.xcodeproj -scheme Maccy
+
+      - name: Fail if Package.resolved changed
+        run: |
+          if ! git diff --exit-code -- '*Package.resolved'; then
+            echo "::error::Package.resolved changed during package resolution. Commit the updated file."
+            exit 1
+          fi
+
+      # Hosted runners have no signing identity for the project's team, so
+      # sign ad hoc with no team. Only the unit-test target runs: MaccyUITests
+      # drive the real status item through the accessibility API, which needs
+      # a granted accessibility permission and a logged-in GUI session that
+      # hosted runners do not provide.
+      - name: Build and test
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Maccy.xcodeproj \
+            -scheme Maccy \
+            -destination 'platform=macOS' \
+            -only-testing:MaccyTests \
+            -disableAutomaticPackageResolution \
+            -resultBundlePath "$RUNNER_TEMP/Maccy.xcresult" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            DEVELOPMENT_TEAM= \
+            PROVISIONING_PROFILE_SPECIFIER= \
+            | tee "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: |
+            ${{ runner.temp }}/Maccy.xcresult
+            ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7

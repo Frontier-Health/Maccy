@@ -1088,13 +1088,7 @@ extension SharedStateTests {
       let item = imageItem(png)
       let before = try #require(item.imageSource(readableBy: StoragePolicy.currentReadAllowList))
 
-      // PROBE: whether SwiftData hands back the same object for the same row.
-      // Both objects are held, so an address can't be reused in between.
-      let first = item.contents.first
-      let again = item.contents.first
       try Storage.shared.context.save()
-      let afterSave = item.contents.first
-      print("PROBE content identity: unsaved same object=\(first === again) after save same object=\(first === afterSave)")
 
       // The source taken before the save still names the same image.
       #expect(item.imageSource(readableBy: StoragePolicy.currentReadAllowList) == before)

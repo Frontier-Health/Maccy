@@ -159,14 +159,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     ensureMigration(key: "2025-07-04-add-jpeg-heic") {
-      // A malformed or profile-managed value is left as it is: rewriting it
+      // An invalid or profile-managed value is left as it is: rewriting it
       // from the fallback would turn storage back on.
       let policy = StoragePolicy.current
-      guard !policy.isMalformed, !policy.isForced,
-            !policy.enabledTypes.isDisjoint(with: StorageType.images.types) else {
+      guard !policy.isForced, let allowList = policy.allowList,
+            !allowList.enabledTypes.isDisjoint(with: StorageType.images.types) else {
         return
       }
-      Defaults[.enabledPasteboardTypes] = policy.enabledTypes.union(StorageType.images.types)
+      Defaults[.enabledPasteboardTypes] = allowList.enabledTypes.union(StorageType.images.types)
     }
 
     ensureMigration(key: "2026-08-12-cleanup-orphaned-history-item-contents") {
@@ -178,7 +178,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Representations the storage allow-list doesn't cover, including the web
-    // archives this used to remove, are deleted on every launch.
+    // archives this used to remove, are deleted on every launch while the
+    // setting is valid. A failed clean-up is retried here on the next launch.
     History.shared.enforceStoragePolicy()
 
     // The following defaults are not used in Maccy 2.x

@@ -25,8 +25,9 @@ nonisolated extension Defaults.Keys {
   static let clearSystemClipboard = Key<Bool>("clearSystemClipboard", default: false, suite: preferencesSuite)
   static let clipboardCheckInterval = Key<Double>("clipboardCheckInterval", default: 0.5, suite: preferencesSuite)
   // Write-only for the Storage settings. Read it only through
-  // StoragePolicy.effective(in:), which treats a malformed value as "store
-  // nothing"; reading this key directly falls back to the default instead.
+  // StoragePolicy.effective(in:), which treats an invalid value as its own
+  // state (capture nothing, delete nothing); reading this key directly falls
+  // back to the default instead.
   static let enabledPasteboardTypes = Key<Set<NSPasteboard.PasteboardType>>(
     StoragePolicy.preferenceKey, default: StoragePolicy.defaultEnabledTypes, suite: preferencesSuite
   )

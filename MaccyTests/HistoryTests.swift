@@ -35,8 +35,8 @@ extension SharedStateTests {
 
     @Test("Adding")
     func adding() {
-      let first = history.add(historyItem("foo"))
-      let second = history.add(historyItem("bar"))
+      let first = history.added(historyItem("foo"))
+      let second = history.added(historyItem("bar"))
       #expect(history.items.toArray() == [second, first])
     }
 
@@ -45,13 +45,13 @@ extension SharedStateTests {
       let first = historyItem("foo")
       first.title = "xyz"
       first.application = "iTerm.app"
-      history.add(first)
+      history.added(first)
       first.pin = "f"
 
       let third = historyItem("foo")
       third.application = "Xcode.app"
       let transferredContents = first.contents
-      let merged = history.add(third)
+      let merged = history.added(third)
 
       #expect(history.items.toArray() == [merged])
       #expect(Set(merged.item.contents) == Set(transferredContents))
@@ -69,13 +69,13 @@ extension SharedStateTests {
       let first = historyItem("foo")
       first.title = "xyz"
       first.application = "iTerm.app"
-      history.add(first)
+      history.added(first)
       first.pin = "f"
 
       let second = historyItem("foo", persisted: false)
       second.application = "Xcode.app"
       let transferredContents = first.contents
-      let merged = history.add(second)
+      let merged = history.added(second)
 
       #expect(history.items.toArray() == [merged])
       #expect(Set(merged.item.contents) == Set(transferredContents))
@@ -104,7 +104,7 @@ extension SharedStateTests {
       firstItem.application = "Maccy.app"
       firstItem.contents = firstContents
       firstItem.title = firstItem.generateTitle()
-      history.add(firstItem)
+      history.added(firstItem)
 
       let secondContents = [
         HistoryItemContent(
@@ -117,7 +117,7 @@ extension SharedStateTests {
       secondItem.application = "Maccy.app"
       secondItem.contents = secondContents
       secondItem.title = secondItem.generateTitle()
-      let second = history.add(secondItem)
+      let second = history.added(secondItem)
 
       #expect(history.items.toArray() == [second])
       #expect(Set(history.items[0].item.contents) == Set(firstContents))
@@ -139,7 +139,7 @@ extension SharedStateTests {
       let firstItem = HistoryItem()
       Storage.shared.context.insert(firstItem)
       firstItem.contents = firstContents
-      history.add(firstItem)
+      history.added(firstItem)
 
       let secondContents = [
         HistoryItemContent(
@@ -154,7 +154,7 @@ extension SharedStateTests {
       let secondItem = HistoryItem()
       Storage.shared.context.insert(secondItem)
       secondItem.contents = secondContents
-      let second = history.add(secondItem)
+      let second = history.added(secondItem)
 
       #expect(history.items.toArray() == [second])
       #expect(Set(history.items[0].item.contents) == Set(firstContents))
@@ -172,7 +172,7 @@ extension SharedStateTests {
       Storage.shared.context.insert(first)
       first.application = "Xcode.app"
       first.contents = firstContents
-      history.add(first)
+      history.added(first)
 
       let secondContents = [
         HistoryItemContent(
@@ -188,7 +188,7 @@ extension SharedStateTests {
       Storage.shared.context.insert(second)
       second.application = "Maccy.app"
       second.contents = secondContents
-      let secondDecorator = history.add(second)
+      let secondDecorator = history.added(second)
 
       #expect(history.items.toArray() == [secondDecorator])
       #expect(history.items[0].item.application == "Xcode.app")
@@ -197,14 +197,14 @@ extension SharedStateTests {
 
     @Test("Modified after copying")
     func modifiedAfterCopying() {
-      history.add(historyItem("foo"))
+      history.added(historyItem("foo"))
 
       let modifiedItem = historyItem("bar")
       modifiedItem.contents.append(HistoryItemContent(
         type: NSPasteboard.PasteboardType.modified.rawValue,
         value: String(Clipboard.shared.changeCount).data(using: .utf8)
       ))
-      let modifiedItemDecorator = history.add(modifiedItem)
+      let modifiedItemDecorator = history.added(modifiedItem)
 
       #expect(history.items.toArray() == [modifiedItemDecorator])
       #expect(history.items[0].text == "bar")
@@ -212,9 +212,9 @@ extension SharedStateTests {
 
     @Test("Clearing unpinned")
     func clearingUnpinned() throws {
-      let pinned = history.add(historyItem("foo"))
+      let pinned = history.added(historyItem("foo"))
       history.togglePin(pinned)
-      history.add(historyItem("bar"))
+      history.added(historyItem("bar"))
       let orphan = HistoryItemContent(
         type: NSPasteboard.PasteboardType.string.rawValue,
         value: "orphan".data(using: .utf8)
@@ -230,8 +230,8 @@ extension SharedStateTests {
 
     @Test("Clearing all")
     func clearingAll() throws {
-      history.add(historyItem("foo"))
-      let pinned = history.add(historyItem("bar"))
+      history.added(historyItem("foo"))
+      let pinned = history.added(historyItem("bar"))
       history.togglePin(pinned)
       Storage.shared.context.insert(HistoryItemContent(
         type: NSPasteboard.PasteboardType.string.rawValue,
@@ -249,7 +249,7 @@ extension SharedStateTests {
     func maxSize() throws {
       var items: [HistoryItemDecorator] = []
       for index in 0...10 {
-        items.append(history.add(historyItem(String(index))))
+        items.append(history.added(historyItem(String(index))))
       }
 
       #expect(history.items.count == 10)
@@ -262,12 +262,12 @@ extension SharedStateTests {
     func maxSizeIgnoresPinned() {
       var items: [HistoryItemDecorator] = []
 
-      let item = history.add(historyItem("0"))
+      let item = history.added(historyItem("0"))
       items.append(item)
       history.togglePin(item)
 
       for index in 1...11 {
-        items.append(history.add(historyItem(String(index))))
+        items.append(history.added(historyItem(String(index))))
       }
 
       #expect(history.items.count == 11)
@@ -278,7 +278,7 @@ extension SharedStateTests {
 
     @Test("Pinning updates pin order")
     func pinningUpdatesPinOrder() {
-      let item = history.add(historyItem("foo"))
+      let item = history.added(historyItem("foo"))
       history.togglePin(item)
 
       #expect(history.pinnedItems == [item])
@@ -295,16 +295,16 @@ extension SharedStateTests {
     func pinningAfterAllShortcutsAreAssigned() async throws {
       let supportedPins = HistoryItem.supportedPins
       for index in 0..<supportedPins.count {
-        let item = history.add(historyItem("keyed \(index)"))
+        let item = history.added(historyItem("keyed \(index)"))
         history.togglePin(item)
       }
 
       #expect(history.availablePins.isEmpty)
       #expect(Set(history.pinnedItems.compactMap(\.item.pin)) == supportedPins)
 
-      let first = history.add(historyItem("first without shortcut"))
+      let first = history.added(historyItem("first without shortcut"))
       history.togglePin(first)
-      let second = history.add(historyItem("second without shortcut"))
+      let second = history.added(historyItem("second without shortcut"))
       history.togglePin(second)
 
       #expect(first.item.pin == "")
@@ -313,7 +313,7 @@ extension SharedStateTests {
       #expect(history.unpinnedItems.isEmpty)
 
       for index in 0...Defaults[.size] {
-        history.add(historyItem("unpinned \(index)"))
+        history.added(historyItem("unpinned \(index)"))
       }
 
       let expectedCount = supportedPins.count + 2
@@ -333,7 +333,7 @@ extension SharedStateTests {
 
     @Test("Unpinning updates pin order")
     func unpinningUpdatesPinOrder() {
-      let item = history.add(historyItem("foo"))
+      let item = history.added(historyItem("foo"))
       history.togglePin(item)
       history.togglePin(item)
 
@@ -343,8 +343,8 @@ extension SharedStateTests {
 
     @Test("Moving pins updates pin order")
     func movingPinsUpdatesPinOrder() {
-      let first = history.add(historyItem("foo"))
-      let second = history.add(historyItem("bar"))
+      let first = history.added(historyItem("foo"))
+      let second = history.added(historyItem("bar"))
       history.togglePin(first)
       history.togglePin(second)
 
@@ -358,10 +358,10 @@ extension SharedStateTests {
     func maxSizeIsChanged() {
       var items: [HistoryItemDecorator] = []
       for index in 0...10 {
-        items.append(history.add(historyItem(String(index))))
+        items.append(history.added(historyItem(String(index))))
       }
       Defaults[.size] = 5
-      history.add(historyItem("11"))
+      history.added(historyItem("11"))
 
       #expect(history.items.count == 5)
       #expect(history.items.contains(items[10]))
@@ -379,12 +379,12 @@ extension SharedStateTests {
 
       // Pin an item; `history.togglePin` re-sorts `all`, so with `.bottom` the
       // pinned item ends up as the last element.
-      let pinned = history.add(historyItem("pinned"))
+      let pinned = history.added(historyItem("pinned"))
       history.togglePin(pinned)
 
       // Fill unpinned history to full capacity.
       for index in 0..<Defaults[.size] {
-        history.add(historyItem(String(index)))
+        history.added(historyItem(String(index)))
       }
 
       #expect(history.items.last == pinned)
@@ -392,7 +392,7 @@ extension SharedStateTests {
       // Re-copy the pinned item. It is detected as a duplicate, removed and
       // re-inserted while `limitHistorySize` trims an exceeding unpinned item.
       // Before the fix this inserted at a stale, out-of-bounds index and crashed.
-      let readded = history.add(historyItem("pinned"))
+      let readded = history.added(historyItem("pinned"))
 
       #expect(history.items.contains(readded))
       #expect(history.items.filter(\.isPinned).count == 1)
@@ -400,8 +400,8 @@ extension SharedStateTests {
 
     @Test("Removing")
     func removing() throws {
-      let foo = history.add(historyItem("foo"))
-      let bar = history.add(historyItem("bar"))
+      let foo = history.added(historyItem("foo"))
+      let bar = history.added(historyItem("bar"))
       history.delete(foo)
       #expect(history.items.toArray() == [bar])
       try assertStorageCounts(items: 1, contents: 1)
@@ -409,7 +409,7 @@ extension SharedStateTests {
 
     @Test("Cleaning up orphaned contents")
     func cleaningUpOrphanedContents() throws {
-      let live = history.add(historyItem("live"))
+      let live = history.added(historyItem("live"))
       let liveContent = live.item.contents[0]
       for value in ["orphan-1", "orphan-2"] {
         Storage.shared.context.insert(HistoryItemContent(
@@ -427,16 +427,15 @@ extension SharedStateTests {
 
     @Test("Removing contents outside the storage allow-list")
     func removingUnpersistableContents() throws {
-      let live = history.add(historyItem("live"))
+      let live = history.added(historyItem("live"))
       live.item.contents.append(HistoryItemContent(
         type: NSPasteboard.PasteboardType.safariWebArchve.rawValue,
         value: Data(repeating: 0x61, count: 1024)
       ))
       try Storage.shared.context.save()
 
-      let policy = StoragePolicy(enabledTypes: StoragePolicy.defaultEnabledTypes)
-      #expect(try Storage.shared.enforce(policy) == 1)
-      #expect(try Storage.shared.enforce(policy) == 0)
+      #expect(try Storage.shared.cleanUp(to: .everything).impact.itemsLosingData == 1)
+      #expect(try !Storage.shared.cleanUp(to: .everything).hasChanges)
       #expect(live.item.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
       try assertStorageCounts(items: 1, contents: 1)
     }

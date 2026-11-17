@@ -97,10 +97,10 @@ class Clipboard {
     guard let item else { return }
 
     pasteboard.clearContents()
-    // Only representations allowed now are written back, whatever was stored
-    // under an earlier policy.
-    let policy = StoragePolicy.current
-    var contents = item.contents.filter { policy.allows(NSPasteboard.PasteboardType($0.type)) }
+    // Only representations that may be read now are written back, whatever
+    // was stored under an earlier policy.
+    let allowList = StoragePolicy.currentReadAllowList
+    var contents = item.contents.filter { allowList.allows(NSPasteboard.PasteboardType($0.type)) }
 
     if removeFormatting {
       contents = clearFormatting(contents)
@@ -201,10 +201,15 @@ class Clipboard {
       return
     }
 
+    // While the storage setting is invalid nothing is captured.
+    guard let allowList = storagePolicy.allowList else {
+      return
+    }
+
     // Reading types on NSPasteboard gives all the available
     // types - even the ones that are not present on the NSPasteboardItem.
     // See https://github.com/p0deje/Maccy/issues/241.
-    if shouldIgnore(Set(pasteboard.types ?? []), storing: storagePolicy) {
+    if shouldIgnore(Set(pasteboard.types ?? []), storing: allowList) {
       return
     }
 
@@ -216,30 +221,34 @@ class Clipboard {
     // so it's better to merge all data into a single record.
     // - https://github.com/p0deje/Maccy/issues/78
     // - https://github.com/p0deje/Maccy/issues/472
+    // Ignore rules read the text of the string, file URL, RTF and HTML
+    // representations whatever the storage setting, without storing it.
     let items = pasteboard.pasteboardItems ?? []
     guard !ignoreRules.rejects(items) else { return }
 
     var contents = [HistoryItemContent]()
     items.forEach({ item in
       let types = Set(item.types)
-      if types.contains(.string) && isEmptyString(item) && !richText(item) {
+      // Only representations that would be stored are read for this check.
+      if allowList.allows(.string) && types.contains(.string) && isEmptyString(item) &&
+          !richText(item, storing: allowList) {
         return
       }
 
-      // Only the allow-list is stored; the data of any other representation is
-      // never read. That also leaves out the Microsoft Word link types and PDF
-      // that bookmarks and cross-references add
+      // Only the allow-list is stored. Beyond the reads above, the data of any
+      // other representation is never read. That also leaves out the Microsoft
+      // Word link types and PDF that bookmarks and cross-references add
       // (https://github.com/p0deje/Maccy/issues/613,
       // https://github.com/p0deje/Maccy/issues/770).
       for type in types {
-        if case .store(let value) = storagePolicy.admission(of: type, value: item.data(forType: type)) {
+        if case .store(let value) = allowList.admission(of: type, value: item.data(forType: type)) {
           contents.append(HistoryItemContent(type: type.rawValue, value: value))
         }
       }
     })
 
     // Metadata alone is not a copy worth recording.
-    guard storagePolicy.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
+    guard allowList.hasStorableContent(contents.map { NSPasteboard.PasteboardType($0.type) }) else {
       return
     }
 
@@ -261,7 +270,10 @@ class Clipboard {
 
     if #unavailable(macOS 15.0) {
       // On macOS 14 the history item needs to be inserted into storage directly after creating it.
-      try? History.shared.insertIntoStorage(historyItem)
+      // Insertion applies the storage policy first and can refuse the item.
+      guard History.shared.insertIntoStorage(historyItem) else {
+        return
+      }
     }
 
     historyItem.application = sourceApp?.bundleIdentifier
@@ -270,11 +282,11 @@ class Clipboard {
     onNewCopyHooks.forEach({ $0(historyItem) })
   }
 
-  private func shouldIgnore(_ types: Set<NSPasteboard.PasteboardType>, storing policy: StoragePolicy) -> Bool {
+  private func shouldIgnore(_ types: Set<NSPasteboard.PasteboardType>, storing allowList: StorageAllowList) -> Bool {
     let ignoredTypes = self.ignoredTypes
       .union(Defaults[.ignoredPasteboardTypes].map({ NSPasteboard.PasteboardType($0) }))
 
-    return types.isDisjoint(with: policy.enabledTypes) ||
+    return types.isDisjoint(with: allowList.enabledTypes) ||
       !types.isDisjoint(with: ignoredTypes)
   }
 
@@ -294,14 +306,14 @@ class Clipboard {
     return string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
-  private func richText(_ item: NSPasteboardItem) -> Bool {
-    if let rtf = item.data(forType: .rtf) {
+  private func richText(_ item: NSPasteboardItem, storing allowList: StorageAllowList) -> Bool {
+    if allowList.allows(.rtf), let rtf = item.data(forType: .rtf) {
       if let attributedString = NSAttributedString(rtf: rtf, documentAttributes: nil) {
         return !attributedString.string.isEmpty
       }
     }
 
-    if let html = item.data(forType: .html) {
+    if allowList.allows(.html), let html = item.data(forType: .html) {
       return ClipboardHTMLText.hasContent(html)
     }
 

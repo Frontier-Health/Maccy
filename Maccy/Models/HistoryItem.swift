@@ -80,11 +80,17 @@ class HistoryItem {
   var numberOfCopies: Int = 1
   var pin: String?
   var title = ""
+  // The user set the title by hand (an alias). It survives the storage
+  // clean-up while the item keeps allowed content; derived titles don't.
+  var hasCustomTitle = false
 
   @Relationship(deleteRule: .cascade, inverse: \HistoryItemContent.item)
   var contents: [HistoryItemContent] = []
 
   @Transient private var cachedDecodedImage: NSImage?
+  // Where the cached image was decoded from, so a cache made from a
+  // representation that has since been removed or disallowed is never used.
+  @Transient private var cachedDecodedImageSource: HistoryItemImageSource?
 
   init(contents: [HistoryItemContent] = []) {
     self.firstCopiedAt = firstCopiedAt
@@ -102,24 +108,77 @@ class HistoryItem {
       }
   }
 
+  // MARK: Titles
+
+  // A derived title, made only from representations `allowList` lets Maccy
+  // read. There is no fallback to the previous title. An image's title is
+  // recognised asynchronously and is "" until then.
   @MainActor
-  func generateTitle() -> String {
-    let pasteboardImageData = contentData(Self.imageTypes)
-    let universalClipboardImageURL = universalClipboardImage ? fileURLs.first : nil
-    guard pasteboardImageData == nil && universalClipboardImageURL == nil else {
-      Task {
-        if let recognizedText = await Self.recognizeText(
-          imageData: pasteboardImageData,
-          fileURL: universalClipboardImageURL
-        ) {
-          self.title = recognizedText
-        }
+  func generateTitle(
+    readableBy allowList: StorageAllowList = StoragePolicy.currentReadAllowList,
+    recognizingImageText: Bool = true
+  ) -> String {
+    if let imageSource = imageSource(readableBy: allowList) {
+      if recognizingImageText {
+        recognizeTitle(from: imageSource)
       }
       return ""
     }
 
+    guard let text = titleText(readableBy: allowList)?.text else {
+      return ""
+    }
+
+    return Self.formatTitle(text)
+  }
+
+  // The representation a derived title is made from.
+  func titleSource(readableBy allowList: StorageAllowList) -> HistoryItemTitleSource? {
+    if let imageSource = imageSource(readableBy: allowList) {
+      return .image(imageSource)
+    }
+
+    return titleText(readableBy: allowList)?.source
+  }
+
+  // Applies the text recognised in an image as the title, unless that image is
+  // no longer the one the title would be made from (it was removed or its type
+  // is no longer allowed), the item is gone, or the user set the title.
+  @MainActor
+  @discardableResult
+  func acceptRecognizedText(_ text: String, from source: HistoryItemImageSource) -> Bool {
+    guard modelContext != nil, !isDeleted, !hasCustomTitle,
+          imageSource(readableBy: StoragePolicy.currentReadAllowList) == source else {
+      return false
+    }
+
+    title = text
+    return true
+  }
+
+  @MainActor
+  private func recognizeTitle(from source: HistoryItemImageSource) {
+    let imageData: Data?
+    let fileURL: URL?
+    switch source {
+    case .content:
+      imageData = self.imageData(from: source)
+      fileURL = nil
+    case .universalClipboardFile(let url):
+      imageData = nil
+      fileURL = url
+    }
+
+    Task {
+      if let recognizedText = await Self.recognizeText(imageData: imageData, fileURL: fileURL) {
+        self.acceptRecognizedText(recognizedText, from: source)
+      }
+    }
+  }
+
+  private static func formatTitle(_ text: String) -> String {
     // 1k characters is trade-off for performance
-    var title = previewableText
+    var title = text
       .shortened(to: 1_000)
       .removingScalarsUnsafeForTitleLayout()
 
@@ -140,32 +199,64 @@ class HistoryItem {
     return title
   }
 
-  var previewableText: String {
-    if !fileURLs.isEmpty {
-      fileURLs
+  // The text a title or preview is made from: file paths, else plain text,
+  // else rich text, else HTML.
+  private func titleText(readableBy allowList: StorageAllowList) -> (source: HistoryItemTitleSource, text: String)? {
+    let urls = fileURLs(readableBy: allowList)
+    if !urls.isEmpty, let content = firstContent([.fileURL], readableBy: allowList) {
+      let text = urls
         .compactMap { $0.absoluteString.removingPercentEncoding }
         .joined(separator: "\n")
-    } else if let text = text, !text.isEmpty {
-      text
-    } else if let rtf = rtf, !rtf.string.isEmpty {
-      rtf.string
-    } else if let html = html, !html.string.isEmpty {
-      html.string
-    } else {
-      title
+      return (.text(content.type, ObjectIdentifier(content)), text)
     }
+
+    if let content = firstContent([.string], readableBy: allowList),
+       let text = content.value.flatMap({ String(data: $0, encoding: .utf8) }), !text.isEmpty {
+      return (.text(content.type, ObjectIdentifier(content)), text)
+    }
+
+    if let content = firstContent([.rtf], readableBy: allowList),
+       let text = content.value.flatMap({ NSAttributedString(rtf: $0, documentAttributes: nil)?.string }),
+       !text.isEmpty {
+      return (.text(content.type, ObjectIdentifier(content)), text)
+    }
+
+    if let content = firstContent([.html], readableBy: allowList),
+       let text = content.value.flatMap({ NSAttributedString(html: $0, documentAttributes: nil)?.string }),
+       !text.isEmpty {
+      return (.text(content.type, ObjectIdentifier(content)), text)
+    }
+
+    return nil
   }
 
-  var fileURLs: [URL] {
-    guard !universalClipboardText else {
+  // Shown in the preview. Falls back to the title, which for an image is the
+  // recognised text.
+  var previewableText: String {
+    titleText(readableBy: StoragePolicy.currentReadAllowList)?.text ?? title
+  }
+
+  // MARK: Reading contents
+  //
+  // Every accessor reads only the representations the current storage policy
+  // lets Maccy read (`StoragePolicy.readAllowList`), so data stored under an
+  // earlier policy is not shown, pasted or exported even before the clean-up
+  // removes it, or if the clean-up failed.
+
+  var fileURLs: [URL] { fileURLs(readableBy: StoragePolicy.currentReadAllowList) }
+  func fileURLs(readableBy allowList: StorageAllowList) -> [URL] {
+    guard !universalClipboardText(readableBy: allowList) else {
       return []
     }
 
-    return allContentData([.fileURL])
+    return contents
+      .filter { NSPasteboard.PasteboardType($0.type) == .fileURL && allowList.allows(.fileURL) }
+      .compactMap { $0.value }
       .compactMap { URL(dataRepresentation: $0, relativeTo: nil, isAbsolute: true) }
   }
 
-  var htmlData: Data? { contentData([.html]) }
+  var htmlData: Data? { htmlData(readableBy: StoragePolicy.currentReadAllowList) }
+  func htmlData(readableBy allowList: StorageAllowList) -> Data? { contentData([.html], readableBy: allowList) }
   var html: NSAttributedString? {
     guard let data = htmlData else {
       return nil
@@ -174,29 +265,57 @@ class HistoryItem {
     return NSAttributedString(html: data, documentAttributes: nil)
   }
 
-  var imageData: Data? {
-    var data: Data?
-    data = contentData(Self.imageTypes)
-    if data == nil, universalClipboardImage, let url = fileURLs.first {
-      data = try? Data(contentsOf: url)
+  // Image data comes only from an image type allowed now, never from another
+  // stored image format.
+  var imageData: Data? { imageData(readableBy: StoragePolicy.currentReadAllowList) }
+  func imageData(readableBy allowList: StorageAllowList) -> Data? {
+    imageSource(readableBy: allowList).flatMap(imageData(from:))
+  }
+
+  func imageSource(readableBy allowList: StorageAllowList) -> HistoryItemImageSource? {
+    if let content = firstContent(Self.imageTypes, readableBy: allowList), content.value != nil {
+      return .content(content.type, ObjectIdentifier(content))
     }
 
-    return data
+    if let url = universalClipboardImageURL(readableBy: allowList) {
+      return .universalClipboardFile(url)
+    }
+
+    return nil
+  }
+
+  private func imageData(from source: HistoryItemImageSource) -> Data? {
+    switch source {
+    case .content(_, let id):
+      return contents.first { ObjectIdentifier($0) == id }?.value
+    case .universalClipboardFile(let url):
+      return try? Data(contentsOf: url)
+    }
   }
 
   var image: NSImage? {
-    if let img = cachedDecodedImage {
-      return img
+    guard let source = imageSource(readableBy: StoragePolicy.currentReadAllowList) else {
+      if cachedDecodedImage != nil {
+        clearDecodedImageCache()
+      }
+      return nil
     }
-    guard let data = imageData else {
+
+    if let image = cachedDecodedImage, cachedDecodedImageSource == source {
+      return image
+    }
+
+    guard let data = imageData(from: source) else {
       return nil
     }
 
     cachedDecodedImage = NSImage(data: data)
+    cachedDecodedImageSource = source
     return cachedDecodedImage
   }
 
-  var rtfData: Data? { contentData([.rtf]) }
+  var rtfData: Data? { rtfData(readableBy: StoragePolicy.currentReadAllowList) }
+  func rtfData(readableBy allowList: StorageAllowList) -> Data? { contentData([.rtf], readableBy: allowList) }
   var rtf: NSAttributedString? {
     guard let data = rtfData else {
       return nil
@@ -208,10 +327,12 @@ class HistoryItem {
   func clearDecodedImageCache() {
     cachedDecodedImage?.recache()
     cachedDecodedImage = nil
+    cachedDecodedImageSource = nil
   }
 
-  var text: String? {
-    guard let data = contentData([.string]) else {
+  var text: String? { text(readableBy: StoragePolicy.currentReadAllowList) }
+  func text(readableBy allowList: StorageAllowList) -> String? {
+    guard let data = contentData([.string], readableBy: allowList) else {
       return nil
     }
 
@@ -229,12 +350,12 @@ class HistoryItem {
 
   // Replaces the item's contents with edited plain text. Every other
   // representation is deleted, not just detached, so the pre-edit content does
-  // not linger in the store. Does nothing and returns false when the policy
-  // doesn't allow storing plain text.
+  // not linger in the store. Does nothing and returns false unless the policy
+  // is valid and allows storing plain text.
   @MainActor
   @discardableResult
   func replaceText(with data: Data, storing policy: StoragePolicy) -> Bool {
-    guard policy.enabledTypes.contains(.string) else {
+    guard policy.allowList?.enabledTypes.contains(.string) == true else {
       return false
     }
 
@@ -255,23 +376,40 @@ class HistoryItem {
   var fromMaccy: Bool { contentData([.fromMaccy]) != nil }
   var universalClipboard: Bool { contentData([.universalClipboard]) != nil }
 
-  private var universalClipboardImage: Bool { universalClipboard && fileURLs.first?.pathExtension == "jpeg" }
-  private var universalClipboardText: Bool {
-    universalClipboard && contentData([.html, .tiff, .png, .jpeg, .rtf, .string, .heic]) != nil
+  // A Universal Clipboard image arrives as a file whose contents are read as an
+  // image without checking their format, so it is used only when every image
+  // type may be read.
+  private func universalClipboardImageURL(readableBy allowList: StorageAllowList) -> URL? {
+    guard universalClipboard,
+          StorageType.images.types.allSatisfy(allowList.allows),
+          let url = fileURLs(readableBy: allowList).first,
+          url.pathExtension == "jpeg" else {
+      return nil
+    }
+
+    return url
   }
 
-  private func contentData(_ types: [NSPasteboard.PasteboardType]) -> Data? {
-    let content = contents.first(where: { content in
-      return types.contains(NSPasteboard.PasteboardType(content.type))
-    })
-
-    return content?.value
+  private func universalClipboardText(readableBy allowList: StorageAllowList) -> Bool {
+    universalClipboard && contentData([.html, .tiff, .png, .jpeg, .rtf, .string, .heic], readableBy: allowList) != nil
   }
 
-  private func allContentData(_ types: [NSPasteboard.PasteboardType]) -> [Data] {
-    return contents
-      .filter { types.contains(NSPasteboard.PasteboardType($0.type)) }
-      .compactMap { $0.value }
+  private func firstContent(
+    _ types: [NSPasteboard.PasteboardType],
+    readableBy allowList: StorageAllowList
+  ) -> HistoryItemContent? {
+    contents.first { content in
+      let type = NSPasteboard.PasteboardType(content.type)
+      return types.contains(type) && allowList.allows(type)
+    }
+  }
+
+  // Metadata markers are always readable.
+  private func contentData(
+    _ types: [NSPasteboard.PasteboardType],
+    readableBy allowList: StorageAllowList = .everything
+  ) -> Data? {
+    firstContent(types, readableBy: allowList)?.value
   }
 
   nonisolated private static let textRecognitionQueue = DispatchQueue(
@@ -314,4 +452,17 @@ class HistoryItem {
       .compactMap { $0.topCandidates(1).first?.string }
       .joined(separator: "\n")
   }
+}
+
+// Where an item's image comes from: a stored representation, or the file a
+// Universal Clipboard copy points to.
+nonisolated enum HistoryItemImageSource: Equatable {
+  case content(String, ObjectIdentifier)
+  case universalClipboardFile(URL)
+}
+
+// The representation a derived title is made from.
+nonisolated enum HistoryItemTitleSource: Equatable {
+  case image(HistoryItemImageSource)
+  case text(String, ObjectIdentifier)
 }

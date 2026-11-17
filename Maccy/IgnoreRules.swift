@@ -10,6 +10,10 @@ final class IgnoreRules {
   static let rtfDataLimit = 512 * 1_024 // Aggregate RTF bytes, before invoking the importer.
   static let patternLimit = 4_096
   static let ruleLimit = 128
+  // Representations whose text the rules match, in every pasteboard item. A
+  // file URL is matched as its percent-decoded URL, path and file name, the
+  // text history shows for it; the file's contents are not read.
+  static let inspectedTypes: [NSPasteboard.PasteboardType] = [.string, .fileURL, .rtf, .html]
 
   private enum Stored: Equatable {
     case patterns([String])
@@ -146,7 +150,7 @@ final class IgnoreRules {
     var representations: [(NSPasteboard.PasteboardType, Data, NSPasteboardItem)] = []
     var remainingData = Self.dataLimit
     for item in items {
-      for type in [NSPasteboard.PasteboardType.string, .rtf, .html] where item.types.contains(type) {
+      for type in Self.inspectedTypes where item.types.contains(type) {
         // An advertised but undelivered representation cannot be verified.
         guard let data = item.data(forType: type) else { return .undecodable }
         guard data.count <= remainingData else { return .dataLimit }
@@ -165,6 +169,9 @@ final class IgnoreRules {
       case .string:
         guard let text = item.string(forType: .string) else { return .undecodable }
         texts = [text]
+      case .fileURL:
+        guard let url = URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true) else { return .undecodable }
+        texts = Self.fileURLTexts(url)
       case .rtf:
         guard data.count <= remainingRTF else { return .rtfDataLimit }
         remainingRTF -= data.count
@@ -210,8 +217,13 @@ final class IgnoreRules {
     return nil
   }
 
+  // Cheap representations first; RTF, which needs the importer, last.
   private func entryPriority(_ type: NSPasteboard.PasteboardType) -> Int {
-    type == .string ? 0 : (type == .html ? 1 : 2)
+    [.string, .fileURL, .html].firstIndex(of: type) ?? 3
+  }
+
+  static func fileURLTexts(_ url: URL) -> [String] {
+    [url.absoluteString.removingPercentEncoding ?? url.absoluteString, url.path(percentEncoded: false), url.lastPathComponent]
   }
 
   static func trimmingTrailingWhitespace(_ text: String) -> String {

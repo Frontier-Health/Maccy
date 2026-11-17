@@ -36,7 +36,7 @@ struct StoragePolicyTests {
     for toggle in StorageType.toggles {
       #expect(!toggle.types.isEmpty)
 
-      let onlyThis = StoragePolicy(enabledTypes: Set(toggle.types))
+      let onlyThis = StorageAllowList(enabledTypes: Set(toggle.types))
       #expect(onlyThis.isEnabled(toggle))
       for type in toggle.types {
         #expect(StoragePolicy.defaultEnabledTypes.contains(type), "\(type.rawValue) missing from the default")
@@ -44,7 +44,7 @@ struct StoragePolicyTests {
         #expect(onlyThis.admission(of: type, value: Data("x".utf8)) == .store(Data("x".utf8)))
       }
 
-      let allButThis = StoragePolicy(enabledTypes: StoragePolicy.defaultEnabledTypes.subtracting(toggle.types))
+      let allButThis = StorageAllowList(enabledTypes: StoragePolicy.defaultEnabledTypes.subtracting(toggle.types))
       #expect(!allButThis.isEnabled(toggle))
       for type in toggle.types {
         #expect(!allButThis.allows(type), "\(type.rawValue) in \(toggle.id) is allowed when it is off")
@@ -59,67 +59,82 @@ struct StoragePolicyTests {
     #expect(toggleTypes.count == Set(toggleTypes).count, "a type is in two toggles")
     #expect(Set(StorageType.all.types) == Set(toggleTypes))
     #expect(StoragePolicy.defaultEnabledTypes == Set(toggleTypes))
+    #expect(StorageAllowList.everything.enabledTypes == StoragePolicy.defaultEnabledTypes)
     #expect(Defaults.Keys.enabledPasteboardTypes.name == StoragePolicy.preferenceKey)
     #expect(Defaults.Keys.enabledPasteboardTypes.defaultValue == StoragePolicy.defaultEnabledTypes)
     #expect(Set(StorageType.images.types) == [.png, .tiff, .jpeg, .heic])
     #expect(StorageType.toggles.map(\.id) == ["Files", "Images", "Text"])
   }
 
+  @Test("Every storable type is either read by the ignore rules or listed as not inspectable, with a reason")
+  @MainActor
+  func ignoreRulesCoverEveryStorableType() {
+    let storable = Set(StorageType.all.types).union(StoragePolicy.metadataTypes)
+    let inspected = Set(IgnoreRules.inspectedTypes)
+    let notInspected = StorageType.notInspectedByIgnoreRules
+    #expect(inspected.isDisjoint(with: notInspected.keys), "a type is both inspected and listed as not inspectable")
+    #expect(inspected.union(notInspected.keys) == storable, "a storable type has no ignore-rule decision")
+    for (type, reason) in notInspected {
+      #expect(!reason.isEmpty, "\(type.rawValue) has no reason")
+    }
+  }
+
   @Test("Only enabled content types and the metadata markers are allowed")
   func allowList() {
-    let policy = StoragePolicy(enabledTypes: StoragePolicy.defaultEnabledTypes)
-    #expect(policy.allowedTypes == StoragePolicy.defaultEnabledTypes.union([.fromMaccy, .universalClipboard, .modified]))
+    let allowList = StorageAllowList.everything
+    #expect(allowList.allowedTypes == StoragePolicy.defaultEnabledTypes.union([.fromMaccy, .universalClipboard, .modified]))
     for type in neverStoredTypes {
-      #expect(!policy.allows(type), "\(type.rawValue) is allowed")
-      #expect(policy.admission(of: type, value: Data("secret".utf8)) == .drop)
+      #expect(!allowList.allows(type), "\(type.rawValue) is allowed")
+      #expect(allowList.admission(of: type, value: Data("secret".utf8)) == .drop)
     }
   }
 
   @Test("Unknown names in the preference cannot enable a type outside the definition")
   func unknownNamesAreIgnored() {
-    let policy = StoragePolicy(enabledTypes: [customType, .pdf, .png])
-    #expect(policy.enabledTypes == [.png])
-    #expect(!policy.allows(customType))
+    let allowList = StorageAllowList(enabledTypes: [customType, .pdf, .png])
+    #expect(allowList.enabledTypes == [.png])
+    #expect(!allowList.allows(customType))
   }
 
   @Test("Metadata markers are stored without the bytes the copying app supplied")
   func metadataIsNormalised() {
-    let policy = StoragePolicy(enabledTypes: [])
+    let allowList = StorageAllowList(enabledTypes: [])
     let secret = Data("patient record".utf8)
-    #expect(policy.admission(of: .fromMaccy, value: secret) == .store(Data()))
-    #expect(policy.admission(of: .universalClipboard, value: secret) == .store(Data()))
-    #expect(policy.admission(of: .modified, value: Data("42".utf8)) == .store(Data("42".utf8)))
-    #expect(policy.admission(of: .modified, value: Data(" 7\n".utf8)) == .store(Data("7".utf8)))
-    #expect(policy.admission(of: .modified, value: secret) == .drop)
-    #expect(policy.admission(of: .modified, value: nil) == .drop)
+    #expect(allowList.admission(of: .fromMaccy, value: secret) == .store(Data()))
+    #expect(allowList.admission(of: .universalClipboard, value: secret) == .store(Data()))
+    #expect(allowList.admission(of: .modified, value: Data("42".utf8)) == .store(Data("42".utf8)))
+    #expect(allowList.admission(of: .modified, value: Data(" 7\n".utf8)) == .store(Data("7".utf8)))
+    #expect(allowList.admission(of: .modified, value: secret) == .drop)
+    #expect(allowList.admission(of: .modified, value: nil) == .drop)
     // Metadata alone is never something to keep.
-    #expect(!policy.hasStorableContent([.fromMaccy, .universalClipboard, .modified]))
+    #expect(!allowList.hasStorableContent([.fromMaccy, .universalClipboard, .modified]))
   }
 
   @Test("The data of a dropped or marker type is never read")
   func droppedDataIsNotRead() {
-    let policy = StoragePolicy(enabledTypes: [.string])
+    let allowList = StorageAllowList(enabledTypes: [.string])
     var reads = 0
     func value() -> Data? {
       reads += 1
       return Data("secret".utf8)
     }
-    _ = policy.admission(of: customType, value: value())
-    _ = policy.admission(of: .png, value: value())
-    _ = policy.admission(of: .fromMaccy, value: value())
-    _ = policy.admission(of: .universalClipboard, value: value())
+    _ = allowList.admission(of: customType, value: value())
+    _ = allowList.admission(of: .png, value: value())
+    _ = allowList.admission(of: .fromMaccy, value: value())
+    _ = allowList.admission(of: .universalClipboard, value: value())
     #expect(reads == 0)
-    _ = policy.admission(of: .string, value: value())
+    _ = allowList.admission(of: .string, value: value())
     #expect(reads == 1)
   }
 
-  @Test("Turning a toggle on or off changes only that toggle's types; from a malformed value it starts from nothing")
+  @Test("Turning a toggle on or off changes only that toggle's types; from an invalid value it starts from nothing")
   func settingToggles() {
     let all = StoragePolicy(enabledTypes: StoragePolicy.defaultEnabledTypes)
     #expect(all.enabledTypes(setting: .images, to: false) == Set(StorageType.files.types + StorageType.text.types))
 
-    let malformed = StoragePolicy(enabledTypes: [], isMalformed: true)
-    #expect(malformed.enabledTypes(setting: .text, to: true) == Set(StorageType.text.types))
+    let invalid = StoragePolicy.invalid()
+    #expect(invalid.enabledTypes(setting: .text, to: true) == Set(StorageType.text.types))
+    #expect(!invalid.isEnabled(.text))
 
     // A partly enabled toggle shows as on, so "off" means none of its types is stored.
     let partial = StoragePolicy(enabledTypes: [.png])
@@ -127,13 +142,62 @@ struct StoragePolicyTests {
     #expect(partial.enabledTypes(setting: .images, to: false).isEmpty)
   }
 
+  @Test("An invalid value is its own state, not an empty allow-list")
+  func invalidIsNotEmpty() {
+    let invalid = StoragePolicy.invalid()
+    let empty = StoragePolicy(enabledTypes: [])
+    #expect(invalid != empty)
+    #expect(invalid.isInvalid)
+    #expect(invalid.allowList == nil)
+    #expect(!invalid.storesAnything)
+    #expect(empty.allowList == StorageAllowList(enabledTypes: []))
+    #expect(!empty.isInvalid)
+    // Stored history stays readable while the value is invalid; it was not cleaned up either.
+    #expect(invalid.readAllowList == .everything)
+    #expect(empty.readAllowList == StorageAllowList(enabledTypes: []))
+  }
+
+  @Test("Turning a toggle on never asks; turning it off asks only when stored items would lose data")
+  @MainActor
+  func toggleChangeDecision() {
+    let all = StoragePolicy(enabledTypes: StoragePolicy.defaultEnabledTypes)
+    let textOnly = StoragePolicy(enabledTypes: Set(StorageType.text.types))
+    let impact = StorageCleanUpImpact(itemsLosingData: 2, itemsRemoved: 1)
+    var counted: [StorageAllowList] = []
+
+    let off = StorageToggleChange.change(from: all, setting: .text, to: false) { allowList in
+      counted.append(allowList)
+      return impact
+    }
+    let withoutText = Set(StorageType.files.types + StorageType.images.types)
+    #expect(off == .confirm(withoutText, impact))
+    #expect(counted == [StorageAllowList(enabledTypes: withoutText)])
+
+    #expect(StorageToggleChange.change(from: all, setting: .text, to: false) { _ in StorageCleanUpImpact() } ==
+      .apply(withoutText))
+    #expect(StorageToggleChange.change(from: textOnly, setting: .images, to: true) { _ in StorageCleanUpImpact() } ==
+      .apply(Set(StorageType.text.types + StorageType.images.types)))
+
+    struct CountFailed: Error {}
+    #expect(StorageToggleChange.change(from: all, setting: .text, to: false) { _ in throw CountFailed() } ==
+      .confirm(withoutText, nil))
+
+    // From an invalid value, turning a toggle on makes the value valid, which
+    // strips every other type, so that asks too.
+    #expect(StorageToggleChange.change(from: .invalid(), setting: .text, to: true) { _ in impact } ==
+      .confirm(Set(StorageType.text.types), impact))
+
+    #expect(StorageToggleChange.change(from: StoragePolicy(enabledTypes: [], isForced: true), setting: .text,
+                                       to: true) { _ in impact } == .refused)
+  }
+
   // MARK: Reading the preference
 
   @Test("An absent preference enables every content type")
   func absentPreference() throws {
     let policy = StoragePolicy.effective(in: try Self.makeDefaults())
-    #expect(policy.enabledTypes == StoragePolicy.defaultEnabledTypes)
-    #expect(!policy.isMalformed)
+    #expect(policy.allowList == .everything)
+    #expect(!policy.isInvalid)
     #expect(!policy.isForced)
   }
 
@@ -147,22 +211,21 @@ struct StoragePolicyTests {
     let defaults = try Self.makeDefaults()
     defaults.set(names, forKey: StoragePolicy.preferenceKey)
     let policy = StoragePolicy.effective(in: defaults)
-    #expect(policy.enabledTypes == expected)
-    #expect(!policy.isMalformed)
+    #expect(policy.allowList?.enabledTypes == expected)
+    #expect(!policy.isInvalid)
   }
 
-  @Test("A malformed preference stores nothing", arguments: [
+  @Test("An invalid preference stores nothing", arguments: [
     "public.utf8-plain-text" as any Sendable, true, 1, ["public.utf8-plain-text", 1] as [any Sendable],
     ["public.utf8-plain-text": true], Data("public.utf8-plain-text".utf8), Date()
   ])
-  func malformedPreference(value: any Sendable) throws {
+  func invalidPreference(value: any Sendable) throws {
     let defaults = try Self.makeDefaults()
     defaults.set(value, forKey: StoragePolicy.preferenceKey)
     let policy = StoragePolicy.effective(in: defaults)
-    #expect(policy.isMalformed)
-    #expect(policy.enabledTypes.isEmpty)
+    #expect(policy.isInvalid)
+    #expect(policy.allowList == nil)
     #expect(!policy.storesAnything)
-    #expect(!policy.allows(.string))
   }
 
   @Test("A preference forced by a configuration profile wins over the user's value")
@@ -177,11 +240,11 @@ struct StoragePolicyTests {
 
     let policy = StoragePolicy.effective(in: defaults)
     #expect(policy.isForced)
-    #expect(policy.enabledTypes == [.string])
+    #expect(policy.allowList?.enabledTypes == [.string])
   }
 
-  @Test("A malformed forced preference stores nothing")
-  func forcedMalformedPreference() throws {
+  @Test("An invalid forced preference stores nothing")
+  func forcedInvalidPreference() throws {
     let suiteName = "org.p0deje.Maccy.tests.storagePolicy.\(UUID().uuidString)"
     let defaults = try #require(ManagedDefaults(
       suiteName: suiteName,
@@ -191,7 +254,7 @@ struct StoragePolicyTests {
 
     let policy = StoragePolicy.effective(in: defaults)
     #expect(policy.isForced)
-    #expect(policy.isMalformed)
+    #expect(policy.isInvalid)
     #expect(!policy.storesAnything)
   }
 
@@ -205,9 +268,12 @@ struct StoragePolicyTests {
 
 // MARK: - Capture and the other write paths
 
+private let stringType = NSPasteboard.PasteboardType.string.rawValue
+private let pngType = NSPasteboard.PasteboardType.png.rawValue
+
 extension SharedStateTests {
   @MainActor
-  final class StorageAllowListTests {
+  final class StorageAllowListTests { // swiftlint:disable:this type_body_length
     let clipboard = Clipboard.shared
     let pasteboard = NSPasteboard.general
     let preferences = Defaults.Keys.enabledPasteboardTypes.suite
@@ -231,6 +297,8 @@ extension SharedStateTests {
       // clearAll bulk-deletes saved rows only, so save anything pending first.
       try? Storage.shared.context.save()
       History.shared.clearAll()
+      // Every test starts from history in line with the default policy.
+      History.shared.enforceStoragePolicy()
     }
 
     deinit {
@@ -252,7 +320,7 @@ extension SharedStateTests {
       let copies = checkNow()
       #expect(copies.count == 1)
       let copied = try #require(copies.first)
-      #expect(copied.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
+      #expect(copied.contents.map(\.type) == [stringType])
     }
 
     @Test("An unknown custom type copied with text is not stored")
@@ -260,7 +328,7 @@ extension SharedStateTests {
       copy([.string: Data("hello".utf8), customType: Data("confidential".utf8)])
 
       let copied = try #require(checkNow().first)
-      #expect(copied.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
+      #expect(copied.contents.map(\.type) == [stringType])
     }
 
     @Test("No type outside the allow-list is stored alongside enabled types")
@@ -276,10 +344,7 @@ extension SharedStateTests {
       copy(representations)
 
       let copied = try #require(checkNow().first)
-      #expect(Set(copied.contents.map(\.type)) == [
-        NSPasteboard.PasteboardType.string.rawValue,
-        NSPasteboard.PasteboardType.html.rawValue
-      ])
+      #expect(Set(copied.contents.map(\.type)) == [stringType, NSPasteboard.PasteboardType.html.rawValue])
     }
 
     @Test("Each required metadata marker is kept, without the copied bytes")
@@ -323,13 +388,42 @@ extension SharedStateTests {
       #expect(checkNow().isEmpty)
     }
 
-    @Test("A malformed preference stores nothing", arguments: [
+    @Test("An invalid preference stores nothing", arguments: [
       "public.utf8-plain-text" as any Sendable, ["public.utf8-plain-text", 1] as [any Sendable], 1
     ])
-    func malformedPreferenceStoresNothing(value: any Sendable) {
+    func invalidPreferenceStoresNothing(value: any Sendable) {
       preferences.set(value, forKey: StoragePolicy.preferenceKey)
       copy([.string: Data("hello".utf8)])
       #expect(checkNow().isEmpty)
+    }
+
+    // MARK: Ignore rules and file URLs
+
+    @Test("Ignore rules see the decoded path of a copied file URL", arguments: [
+      "file:///tmp/PATIENT-123.txt",
+      "file:///tmp/PATIENT%2D123.txt",
+      "file:///Users/me/Ward%20notes/PATIENT-123"
+    ])
+    func ignoreRulesMatchFileURLPath(url: String) {
+      Defaults[.ignoreRegexp] = ["PATIENT-123"]
+      copy([.fileURL: Data(url.utf8)])
+      #expect(checkNow().isEmpty)
+    }
+
+    @Test("Ignore rules see a file URL in any pasteboard item, and a non-matching path is stored")
+    func ignoreRulesMatchFileURLInLaterItem() throws {
+      Defaults[.ignoreRegexp] = ["PATIENT-123"]
+      let text = NSPasteboardItem()
+      text.setString("hello", forType: .string)
+      let file = NSPasteboardItem()
+      file.setData(Data("file:///tmp/PATIENT-123.txt".utf8), forType: .fileURL)
+      pasteboard.clearContents()
+      pasteboard.writeObjects([text, file])
+      #expect(checkNow().isEmpty)
+
+      copy([.fileURL: Data("file:///tmp/report.txt".utf8)])
+      let copied = try #require(checkNow().first)
+      #expect(copied.title == "file:///tmp/report.txt")
     }
 
     // MARK: Copying back to the pasteboard
@@ -350,7 +444,7 @@ extension SharedStateTests {
       #expect(pasteboard.string(forType: .fromMaccy) == "")
     }
 
-    // MARK: History and the store
+    // MARK: Adding to history
 
     @Test("History.add stores only allowed types")
     func addIsFiltered() throws {
@@ -361,62 +455,371 @@ extension SharedStateTests {
         customType: Data("confidential".utf8)
       ])
 
-      let added = History.shared.add(item)
-      #expect(added.item.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
-      try expectStoredTypes([NSPasteboard.PasteboardType.string.rawValue])
+      let added = History.shared.added(item)
+      #expect(added.item.contents.map(\.type) == [stringType])
+      try expectStoredTypes([stringType])
+    }
+
+    @Test("A new item is filtered before it is first saved, and one with nothing allowed is never saved")
+    func addFiltersBeforeSaving() throws {
+      turn(.images, on: false)
+      let saves = SavedContentLog()
+      let observer = NotificationCenter.default.addObserver(
+        forName: ModelContext.didSave,
+        object: nil,
+        queue: nil
+      ) { _ in
+        MainActor.assumeIsolated {
+          // What a second context on the same container sees after each save.
+          let context = ModelContext(Storage.shared.container)
+          saves.append((try? context.fetch(FetchDescriptor<HistoryItemContent>()).map(\.type)) ?? ["fetch failed"])
+        }
+      }
+      defer { NotificationCenter.default.removeObserver(observer) }
+
+      let mixed = HistoryItem(contents: [
+        HistoryItemContent(type: stringType, value: Data("hello".utf8)),
+        HistoryItemContent(type: pngType, value: Data("image bytes".utf8)),
+        HistoryItemContent(type: customType.rawValue, value: Data("confidential".utf8))
+      ])
+      mixed.title = "hello"
+      let added = try #require(History.shared.add(mixed))
+      #expect(added.item.contents.map(\.type) == [stringType])
+
+      let disallowed = HistoryItem(contents: [
+        HistoryItemContent(type: pngType, value: Data("image bytes".utf8)),
+        HistoryItemContent(type: customType.rawValue, value: Data("confidential".utf8))
+      ])
+      disallowed.title = "stale title"
+      #expect(History.shared.add(disallowed) == nil)
+      #expect(disallowed.modelContext == nil)
+
+      #expect(!saves.entries.isEmpty)
+      for types in saves.entries {
+        #expect(types.allSatisfy { $0 == stringType }, "saved \(types)")
+      }
+      let fresh = ModelContext(Storage.shared.container)
+      #expect(try fresh.fetchCount(FetchDescriptor<HistoryItem>()) == 1)
+      #expect(try fresh.fetch(FetchDescriptor<HistoryItemContent>()).map(\.type) == [stringType])
+      #expect(History.shared.items.count == 1)
     }
 
     @Test("Merging a duplicate does not carry over types that are no longer allowed")
     func duplicateMergeIsFiltered() throws {
-      History.shared.add(storedItem([.string: Data("hello".utf8), .png: Data("image bytes".utf8)]))
+      History.shared.added(storedItem([.string: Data("hello".utf8), .png: Data("image bytes".utf8)]))
       turn(.images, on: false)
 
-      let merged = History.shared.add(storedItem([.string: Data("hello".utf8)]))
+      let merged = History.shared.added(storedItem([.string: Data("hello".utf8)]))
       #expect(merged.item.numberOfCopies == 2)
-      #expect(merged.item.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
-      try expectStoredTypes([NSPasteboard.PasteboardType.string.rawValue])
+      #expect(merged.item.contents.map(\.type) == [stringType])
+      try expectStoredTypes([stringType])
     }
 
+    @Test("Merging a duplicate drops a title recognised in an image that is no longer allowed")
+    func duplicateMergeRegeneratesTitle() throws {
+      let existing = History.shared.added(storedItem([.string: Data("hello".utf8), .png: Data("image bytes".utf8)]))
+      existing.item.title = "text recognised in the image"
+      turn(.images, on: false)
+
+      let new = HistoryItem(contents: [HistoryItemContent(type: stringType, value: Data("hello".utf8))])
+      new.title = new.generateTitle()
+      let merged = History.shared.added(new)
+      #expect(merged.item.title == "hello")
+      #expect(merged.title == "hello")
+    }
+
+    @Test("Merging a duplicate keeps a title the user set, and a derived title whose source survives")
+    func duplicateMergeKeepsTitles() throws {
+      let aliased = History.shared.added(storedItem([.string: Data("one".utf8), .png: Data("image".utf8)]))
+      aliased.item.title = "My alias"
+      aliased.item.hasCustomTitle = true
+      let recognised = History.shared.added(storedItem([.string: Data("two".utf8), .png: Data("picture".utf8)]))
+      recognised.item.title = "text recognised in the picture"
+      turn(.images, on: false)
+
+      let first = History.shared.added(HistoryItem(contents: [
+        HistoryItemContent(type: stringType, value: Data("one".utf8))
+      ]))
+      #expect(first.item.title == "My alias")
+      #expect(first.item.hasCustomTitle)
+
+      turn(.images, on: true)
+      turn(.text, on: false)
+      let second = History.shared.added(HistoryItem(contents: [
+        HistoryItemContent(type: pngType, value: Data("picture".utf8))
+      ]))
+      #expect(second.item.title == "text recognised in the picture")
+    }
+
+    // MARK: Derived data
+
+    @Test("Text recognised in an image is not applied once that image is removed or disallowed")
+    func lateRecognitionIsDiscarded() throws {
+      let item = storedItem([.string: Data("visible text".utf8), .png: Data("image bytes".utf8)])
+      let source = try #require(item.imageSource(readableBy: .everything))
+      // Still current: applied.
+      #expect(item.acceptRecognizedText("first result", from: source))
+      #expect(item.title == "first result")
+
+      // Disallowed, before any clean-up: discarded.
+      turn(.images, on: false)
+      #expect(!item.acceptRecognizedText("text in the image", from: source))
+
+      // Removed by the clean-up, which also redoes the title: discarded.
+      try Storage.shared.cleanUp(to: try #require(StoragePolicy.current.allowList))
+      #expect(item.title == "visible text")
+      #expect(!item.acceptRecognizedText("text in the image", from: source))
+      #expect(item.title == "visible text")
+
+      // A title the user set is never replaced.
+      turn(.images, on: true)
+      let aliased = storedItem([.png: Data("image bytes".utf8)])
+      aliased.title = "My alias"
+      aliased.hasCustomTitle = true
+      let aliasedSource = try #require(aliased.imageSource(readableBy: .everything))
+      #expect(!aliased.acceptRecognizedText("text in the image", from: aliasedSource))
+      #expect(aliased.title == "My alias")
+    }
+
+    @Test("A title is made only from what may be read, with no fallback to the old title")
+    func generatedTitleHasNoFallback() {
+      let image = storedItem([.png: Data("image bytes".utf8)])
+      image.title = "text recognised in the image"
+      let textOnly = StorageAllowList(enabledTypes: Set(StorageType.text.types))
+      #expect(image.generateTitle(readableBy: textOnly) == "")
+
+      let emptyText = storedItem([.string: Data("".utf8)])
+      emptyText.title = "old title"
+      #expect(emptyText.generateTitle() == "")
+
+      let file = storedItem([.fileURL: Data("file:///tmp/PATIENT-1.txt".utf8), .string: Data("note".utf8)])
+      #expect(file.generateTitle(readableBy: textOnly) == "note")
+    }
+
+    @Test("A decoded image is not reused once its type is disallowed or it is removed")
+    func imageCachesAreInvalidated() throws {
+      let decorator = History.shared.added(storedItem([.string: Data("caption".utf8), .png: try pngData()]))
+      #expect(decorator.item.image != nil)
+      decorator.sizeImages()
+      #expect(decorator.thumbnailImage != nil)
+
+      turn(.images, on: false)
+      // Before any clean-up the cached image is no longer handed out.
+      #expect(decorator.item.image == nil)
+      #expect(decorator.item.imageData == nil)
+
+      #expect(History.shared.enforceStoragePolicy())
+      #expect(decorator.thumbnailImage == nil)
+      #expect(decorator.previewImage == nil)
+      let current = try #require(History.shared.items.first)
+      #expect(!current.hasImage)
+      #expect(current.title == "caption")
+    }
+
+    @Test("After a policy change, history titles (searched and returned by Select) are the regenerated ones")
+    func historyTitlesAreRegenerated() throws {
+      History.shared.added(storedItem([
+        .fileURL: Data("file:///tmp/PATIENT-1.txt".utf8),
+        .string: Data("note".utf8)
+      ]))
+      #expect(History.shared.items.map(\.title) == ["file:///tmp/PATIENT-1.txt"])
+
+      turn(.files, on: false)
+      #expect(History.shared.enforceStoragePolicy())
+      #expect(History.shared.items.map(\.title) == ["note"])
+      #expect(History.shared.items.map(\.item.title) == ["note"])
+    }
+
+    // MARK: The Get intent
+
+    @Test("The Get intent hands out only an allowed image type, never an older stored format")
+    func getIntentImageIsExactType() {
+      let older = storedItem([.jpeg: Data("jpeg bytes".utf8), .string: Data("caption".utf8)])
+      let both = storedItem([.jpeg: Data("jpeg bytes".utf8), .png: Data("png bytes".utf8)])
+      Defaults[.enabledPasteboardTypes] = [.png, .string]
+
+      let allowList = StoragePolicy.current.readAllowList
+      let olderContents = Get.contents(of: older, readableBy: allowList)
+      #expect(olderContents.image == nil)
+      #expect(olderContents.text == "caption")
+      #expect(Get.contents(of: both, readableBy: allowList).image == Data("png bytes".utf8))
+      #expect(older.image == nil)
+    }
+
+    @Test("A Universal Clipboard image file is read only while every image type may be read")
+    func universalClipboardImageNeedsEveryImageType() {
+      let item = storedItem([
+        .fileURL: URL(fileURLWithPath: "/tmp/photo.jpeg").dataRepresentation,
+        .universalClipboard: Data()
+      ])
+      guard case .universalClipboardFile(let url) = item.imageSource(readableBy: .everything) else {
+        Issue.record("no Universal Clipboard image source with every type allowed")
+        return
+      }
+      #expect(url.path == "/tmp/photo.jpeg")
+
+      let pngOnly = StorageAllowList(enabledTypes: [.png, .fileURL])
+      #expect(item.imageSource(readableBy: pngOnly) == nil)
+      #expect(Get.contents(of: item, readableBy: pngOnly).image == nil)
+    }
+
+    // MARK: The store
+
     @Test("Existing items are brought in line with the policy: types removed, emptied items deleted, titles redone")
-    func storeIsEnforced() throws {
+    func storeIsCleanedUp() throws {
       let mixed = storedItem([
         .string: Data("keep me".utf8),
         .jpeg: Data("image bytes".utf8),
         customType: Data("confidential".utf8)
       ])
       mixed.title = "OCR text from the image"
-      _ = storedItem([.png: Data("image bytes".utf8)])
+      let pinnedImage = storedItem([.png: Data("image bytes".utf8)])
+      pinnedImage.pin = "b"
       let marked = storedItem([.string: Data("marked".utf8), .fromMaccy: Data("secret".utf8)])
       try Storage.shared.context.save()
 
       turn(.images, on: false)
-      #expect(try Storage.shared.enforce(.current) == 3)
+      let allowList = try #require(StoragePolicy.current.allowList)
+      #expect(try Storage.shared.cleanUpImpact(of: allowList) ==
+        StorageCleanUpImpact(itemsLosingData: 1, itemsRemoved: 1))
+      let result = try Storage.shared.cleanUp(to: allowList)
+      #expect(result.impact == StorageCleanUpImpact(itemsLosingData: 1, itemsRemoved: 1))
+      #expect(result.markersNormalised == 1)
 
       let items = try Storage.shared.context.fetch(FetchDescriptor<HistoryItem>())
       #expect(items.count == 2)
-      #expect(mixed.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
+      #expect(mixed.contents.map(\.type) == [stringType])
       #expect(mixed.title == "keep me")
       #expect(marked.contents.first { $0.type == NSPasteboard.PasteboardType.fromMaccy.rawValue }?.value == Data())
-      try expectStoredTypes([
-        NSPasteboard.PasteboardType.string.rawValue,
-        NSPasteboard.PasteboardType.string.rawValue,
-        NSPasteboard.PasteboardType.fromMaccy.rawValue
-      ])
+      try expectStoredTypes([stringType, stringType, NSPasteboard.PasteboardType.fromMaccy.rawValue])
 
-      #expect(try Storage.shared.enforce(.current) == 0)
+      #expect(try !Storage.shared.cleanUp(to: allowList).hasChanges)
+    }
+
+    @Test("Clean-up keeps a title the user set, and a derived title whose source survives")
+    func cleanUpKeepsTitles() throws {
+      let aliased = storedItem([.string: Data("note".utf8), .fileURL: Data("file:///tmp/PATIENT-1.txt".utf8)])
+      aliased.title = "My alias"
+      aliased.hasCustomTitle = true
+      let recognised = storedItem([.string: Data("caption".utf8), .png: Data("image bytes".utf8)])
+      recognised.title = "text recognised in the image"
+      try Storage.shared.context.save()
+
+      turn(.files, on: false)
+      turn(.text, on: false)
+      turn(.text, on: true)
+      try Storage.shared.cleanUp(to: try #require(StoragePolicy.current.allowList))
+      #expect(aliased.title == "My alias")
+      #expect(aliased.contents.map(\.type) == [stringType])
+
+      // The image is still what the title comes from, so it is not recognised again.
+      turn(.text, on: false)
+      let result = try Storage.shared.cleanUp(to: try #require(StoragePolicy.current.allowList))
+      #expect(recognised.title == "text recognised in the image")
+      #expect(recognised.contents.map(\.type) == [pngType])
+      #expect(result.impact == StorageCleanUpImpact(itemsLosingData: 1, itemsRemoved: 1))
+    }
+
+    @Test("A failed clean-up leaves the store exactly as it was, and a later one succeeds")
+    func failedCleanUpRollsBack() throws {
+      let mixed = storedItem([.string: Data("keep".utf8), .png: Data("image bytes".utf8)])
+      mixed.title = "text recognised in the image"
+      let pinnedImage = storedItem([.png: Data("image bytes".utf8)])
+      pinnedImage.pin = "b"
+      try Storage.shared.context.save()
+
+      turn(.images, on: false)
+      let allowList = try #require(StoragePolicy.current.allowList)
+      struct InjectedFailure: Error {}
+      #expect(throws: InjectedFailure.self) {
+        try Storage.shared.cleanUp(to: allowList) { throw InjectedFailure() }
+      }
+
+      let fresh = ModelContext(Storage.shared.container)
+      #expect(try fresh.fetchCount(FetchDescriptor<HistoryItem>()) == 2)
+      #expect(try fresh.fetch(FetchDescriptor<HistoryItemContent>()).map(\.type).sorted() ==
+        [pngType, pngType, stringType])
+      #expect(!Storage.shared.context.hasChanges)
+      #expect(try Storage.shared.context.fetchCount(FetchDescriptor<HistoryItem>()) == 2)
+      #expect(Set(mixed.contents.map(\.type)) == [stringType, pngType])
+      #expect(mixed.title == "text recognised in the image")
+      // The disallowed image stays out of reach meanwhile.
+      #expect(mixed.imageData == nil)
+
+      let result = try Storage.shared.cleanUp(to: allowList)
+      #expect(result.impact == StorageCleanUpImpact(itemsLosingData: 1, itemsRemoved: 1))
+      #expect(try ModelContext(Storage.shared.container).fetchCount(FetchDescriptor<HistoryItem>()) == 1)
+    }
+
+    @Test("The clean-up log line holds counts only")
+    func cleanUpLogLineHasCountsOnly() throws {
+      _ = storedItem([.string: Data("PATIENT-123 discharge note".utf8), .png: Data("image bytes".utf8)])
+      _ = storedItem([.png: Data("image bytes".utf8)])
+      turn(.images, on: false)
+
+      let result = try Storage.shared.cleanUp(to: try #require(StoragePolicy.current.allowList))
+      #expect(result.logMessage == "Applied storage settings to history: 1 items lost data, 1 items removed, " +
+        "0 markers normalised, 0 orphaned contents removed")
+      #expect(!result.logMessage.contains("PATIENT"))
     }
 
     @Test("History applies a changed policy to stored items")
     func historyEnforcesChangedPolicy() throws {
-      History.shared.enforceStoragePolicy()
       _ = storedItem([.string: Data("text".utf8)])
       try Storage.shared.context.save()
 
       turn(.text, on: false)
-      History.shared.enforceStoragePolicy()
+      #expect(History.shared.enforceStoragePolicy())
       #expect(try Storage.shared.context.fetchCount(FetchDescriptor<HistoryItem>()) == 0)
       #expect(try Storage.shared.context.fetchCount(FetchDescriptor<HistoryItemContent>()) == 0)
     }
+
+    @Test("An invalid value keeps every stored item, pins included, and captures nothing")
+    func invalidPolicyKeepsHistory() throws {
+      let pinned = History.shared.added(storedItem([.string: Data("pinned".utf8), .png: Data("image".utf8)]))
+      History.shared.togglePin(pinned)
+      History.shared.added(storedItem([.fileURL: Data("file:///tmp/report.txt".utf8)]))
+      try Storage.shared.context.save()
+      let before = try storedSnapshot()
+
+      preferences.set("public.utf8-plain-text", forKey: StoragePolicy.preferenceKey)
+      #expect(!History.shared.enforceStoragePolicy())
+      #expect(try storedSnapshot() == before)
+      #expect(History.shared.items.count == 2)
+
+      copy([.string: Data("new copy".utf8)])
+      #expect(checkNow().isEmpty)
+      #expect(History.shared.add(HistoryItem(contents: [
+        HistoryItemContent(type: stringType, value: Data("new copy".utf8))
+      ])) == nil)
+      #expect(try storedSnapshot() == before)
+    }
+
+    @Test("Counting what a toggle would remove reads type names only and changes nothing")
+    func toggleImpactIsCounted() throws {
+      _ = storedItem([.string: Data("text only".utf8)])
+      let pinned = storedItem([.string: Data("text".utf8), .png: Data("image".utf8)])
+      pinned.pin = "b"
+      try Storage.shared.context.save()
+      let before = try storedSnapshot()
+
+      let change = StorageToggleChange.change(from: .current, setting: .text, to: false) {
+        try Storage.shared.cleanUpImpact(of: $0)
+      }
+      #expect(change == .confirm(
+        Set(StorageType.files.types + StorageType.images.types),
+        StorageCleanUpImpact(itemsLosingData: 1, itemsRemoved: 1)
+      ))
+      #expect(StorageToggleChange.change(from: .current, setting: .files, to: false) {
+        try Storage.shared.cleanUpImpact(of: $0)
+      } == .apply(Set(StorageType.images.types + StorageType.text.types)))
+      #expect(!Storage.shared.context.hasChanges)
+      #expect(try storedSnapshot() == before)
+      #expect(StorageSettingsPane.removeStoredDataMessage(StorageCleanUpImpact(itemsLosingData: 1, itemsRemoved: 1))
+        .contains("cannot be undone"))
+    }
+
+    // MARK: The item editor
 
     @Test("Editing text deletes the other representations rather than orphaning them")
     func editorReplacesText() throws {
@@ -424,17 +827,19 @@ extension SharedStateTests {
       try Storage.shared.context.save()
 
       #expect(item.replaceText(with: Data("after".utf8), storing: .current))
-      #expect(item.contents.map(\.type) == [NSPasteboard.PasteboardType.string.rawValue])
+      #expect(item.contents.map(\.type) == [stringType])
       #expect(item.text == "after")
-      try expectStoredTypes([NSPasteboard.PasteboardType.string.rawValue])
+      try expectStoredTypes([stringType])
     }
 
-    @Test("Editing is refused when plain text may not be stored")
+    @Test("Editing is refused when plain text may not be stored, or the setting is invalid")
     func editorRefusedWhenTextOff() throws {
       let item = storedItem([.string: Data("before".utf8)])
       turn(.text, on: false)
-
       #expect(!item.replaceText(with: Data("after".utf8), storing: .current))
+      #expect(!item.replaceText(with: Data("after".utf8), storing: .invalid()))
+
+      turn(.text, on: true)
       #expect(item.text == "before")
     }
 
@@ -470,8 +875,27 @@ extension SharedStateTests {
       item.contents = representations
         .sorted { $0.key.rawValue < $1.key.rawValue }
         .map { HistoryItemContent(type: $0.key.rawValue, value: $0.value) }
+      item.title = item.generateTitle(recognizingImageText: false)
       try? Storage.shared.context.save()
       return item
+    }
+
+    private func pngData() throws -> Data {
+      let rep = try #require(NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+      ))
+      return try #require(rep.representation(using: .png, properties: [:]))
+    }
+
+    // Every stored item and representation, as a second context sees them.
+    private func storedSnapshot() throws -> [String] {
+      let context = ModelContext(Storage.shared.container)
+      let items = try context.fetch(FetchDescriptor<HistoryItem>()).map { item in
+        "item \(item.title) pin=\(item.pin ?? "-") " + item.contents.map(\.type).sorted().joined(separator: ",")
+      }
+      let contents = try context.fetch(FetchDescriptor<HistoryItemContent>()).map { "content \($0.type)" }
+      return (items + contents).sorted()
     }
 
     private func expectStoredTypes(
@@ -488,6 +912,28 @@ extension SharedStateTests {
       let stored = try context.fetch(FetchDescriptor<HistoryItemContent>()).map(\.type)
       #expect(stored.sorted() == expected.sorted(), sourceLocation: sourceLocation)
     }
+  }
+}
+
+// What each save wrote, collected from a notification observer.
+final class SavedContentLog: @unchecked Sendable {
+  private(set) var entries: [[String]] = []
+
+  func append(_ entry: [String]) {
+    entries.append(entry)
+  }
+}
+
+extension History {
+  // Adds an item the test expects to be stored.
+  @MainActor
+  @discardableResult
+  func added(_ item: HistoryItem, sourceLocation: SourceLocation = #_sourceLocation) -> HistoryItemDecorator {
+    guard let decorator = add(item) else {
+      Issue.record("History refused an item the test expected it to store", sourceLocation: sourceLocation)
+      return HistoryItemDecorator(item)
+    }
+    return decorator
   }
 }
 

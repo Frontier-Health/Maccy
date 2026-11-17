@@ -14,6 +14,10 @@ struct ItemEditorView: View {
   @State private var isTextContent: Bool
   @State private var isRichText: Bool
   @State private var isContentTooLarge: Bool
+  // Edited content is saved as plain text, so it can be edited only while the
+  // storage policy allows storing plain text.
+  @State private var isTextStorable: Bool
+  @State private var saveError: String?
 
   private var hasWarning: Bool {
     isContentTooLarge || (isRichText && editableContent.hasChanges)
@@ -40,6 +44,20 @@ struct ItemEditorView: View {
     )
     self._isRichText = State(
       initialValue: item.hasRichText && !item.hasImage && !item.hasFileURLs
+    )
+    self._isTextStorable = State(initialValue: Self.textIsStorable)
+  }
+
+  private static var textIsStorable: Bool {
+    StoragePolicy.current.allowList?.enabledTypes.contains(.string) == true
+  }
+
+  private static var textNotStorableMessage: String {
+    NSLocalizedString(
+      "TextNotStorable",
+      tableName: "PinsSettings",
+      value: "Content can't be edited because Maccy is not saving text. Turn on Text in Storage settings to edit it.",
+      comment: ""
     )
   }
 
@@ -80,7 +98,21 @@ struct ItemEditorView: View {
           Text("Content", tableName: "PinsSettings")
             .font(.headline)
 
-          if hasWarning {
+          if let saveError {
+            Label {
+              Text(saveError)
+            } icon: {
+              Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            }
+          } else if !isTextStorable && (isTextContent || isRichText) {
+            Label {
+              Text(Self.textNotStorableMessage)
+            } icon: {
+              Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+            }
+          } else if hasWarning {
             Label {
               if isContentTooLarge {
                 Text(NSLocalizedString(
@@ -147,11 +179,11 @@ struct ItemEditorView: View {
       if isTextContent || isRichText {
         LargeTextView(
           editorState: editableContent,
-          isEditable: !isContentTooLarge,
+          isEditable: !isContentTooLarge && isTextStorable,
           accessibilityLabel: NSLocalizedString("Content", tableName: "PinsSettings", comment: ""),
           onCancel: { dismiss() }
         )
-          .disabled(isContentTooLarge)
+          .disabled(isContentTooLarge || !isTextStorable)
           .padding(.horizontal, 8)
           .padding(.vertical, 6)
       } else {
@@ -188,26 +220,36 @@ struct ItemEditorView: View {
     return titleChanged || pinChanged || contentChanged
   }
 
-  private func applyChanges() {
+  // Applies every change, or none: a content edit the storage policy refuses
+  // leaves the title and pin unchanged too. Returns whether it was applied.
+  private func applyChanges() -> Bool {
+    if (isTextContent || isRichText) && editableContent.hasChanges {
+      guard let data = editableContent.text.data(using: .utf8),
+            item.item.replaceText(with: data, storing: StoragePolicy.current) else {
+        isTextStorable = Self.textIsStorable
+        saveError = Self.textNotStorableMessage
+        return false
+      }
+    }
+
     if !item.hasImage && editableTitle != item.item.title {
-      item.item.title = editableTitle
-      item.title = editableTitle
+      // An empty alias goes back to a title made from the content.
+      item.item.hasCustomTitle = !editableTitle.isEmpty
+      item.item.title = editableTitle.isEmpty ? item.item.generateTitle() : editableTitle
+      item.title = item.item.title
     }
 
     if let selectedPin {
       appState.history.updatePin(item.item, to: selectedPin)
     }
 
-    guard isTextContent || isRichText else { return }
-    guard editableContent.hasChanges,
-          let data = editableContent.text.data(using: .utf8) else { return }
-
-    item.item.replaceText(with: data, storing: StoragePolicy.current)
+    return true
   }
 
   private func saveChanges() {
     guard hasChangesToApply else { return }
-    applyChanges()
+    // A refused save keeps the editor open and says why.
+    guard applyChanges() else { return }
     dismiss()
   }
 }

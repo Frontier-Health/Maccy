@@ -20,6 +20,8 @@ struct Select: AppIntent, CustomIntentMigratedAppIntent {
 
   func perform() async throws -> some IntentResult & ReturnsValue<String> {
     let value = try await MainActor.run { () -> String in
+      // Titles reflect the current storage policy before one is returned.
+      AppState.shared.history.enforceStoragePolicy()
       let items = AppState.shared.history.items
       let index = number - positionOffset
       guard items.count >= index else {

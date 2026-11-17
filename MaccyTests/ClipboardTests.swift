@@ -41,7 +41,8 @@ extension SharedStateTests {
       clipboard.clearHooks()
     }
 
-    deinit {
+    // Isolated: it resets main actor state.
+    isolated deinit {
       clipboard.sourceBundleIdentifierForTesting = nil
       clipboard.afterInspectionForTesting = nil
       Defaults[.enabledPasteboardTypes] = savedEnabledTypes

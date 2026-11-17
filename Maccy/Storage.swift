@@ -67,8 +67,10 @@ class Storage {
   //
   // Unrelated pending changes are saved first. The clean-up then runs with
   // autosave off and is saved once; if anything fails, including the save, the
-  // context is rolled back and the store is left as it was. `beforeCommit`
-  // runs just before the save; tests use it to inject a failure.
+  // context is rolled back and the store is left as it was. SwiftData's
+  // rollback doesn't revert the in-memory state of models it already loaded,
+  // so the clean-up records what it changes and restores that too.
+  // `beforeCommit` runs just before the save; tests use it to inject a failure.
   @discardableResult
   func cleanUp(
     to allowList: StorageAllowList,
@@ -82,14 +84,16 @@ class Storage {
     context.autosaveEnabled = false
     defer { context.autosaveEnabled = autosaveEnabled }
 
+    var undo: [() -> Void] = []
     do {
-      let result = try applyCleanUp(to: allowList)
+      let result = try applyCleanUp(to: allowList, undo: &undo)
       try beforeCommit()
       if context.hasChanges {
         try context.save()
       }
       return result
     } catch {
+      undo.reversed().forEach { $0() }
       context.rollback()
       throw error
     }
@@ -145,7 +149,7 @@ class Storage {
     return try context.fetch(descriptor)
   }
 
-  private func applyCleanUp(to allowList: StorageAllowList) throws -> StorageCleanUpResult {
+  private func applyCleanUp(to allowList: StorageAllowList, undo: inout [() -> Void]) throws -> StorageCleanUpResult {
     let plan = try cleanUpPlan(for: allowList)
     var result = StorageCleanUpResult(impact: plan.impact)
     let removedIDs = Set(plan.itemsToRemove.map(\.persistentModelID))
@@ -156,6 +160,7 @@ class Storage {
 
     // Only items that lose data are read beyond their type names.
     for item in plan.itemsLosingData {
+      undo.append(Self.snapshot(of: item))
       let titleSourceBefore = item.titleSource(readableBy: .everything)
       sanitize(item, to: allowList)
       if !item.hasCustomTitle && item.titleSource(readableBy: allowList) != titleSourceBefore {
@@ -179,18 +184,34 @@ class Storage {
       guard let item = content.item, !removedIDs.contains(item.persistentModelID) else {
         continue
       }
+      let value = content.value
+      undo.append(Self.snapshot(of: item))
+      undo.append { content.value = value }
       if sanitize(content, of: item, to: allowList) {
         result.markersNormalised += 1
       }
     }
 
     context.processPendingChanges()
-    let orphans = try context.fetch(FetchDescriptor<HistoryItemContent>(predicate: #Predicate<HistoryItemContent> { $0.item == nil }))
+    let orphans = try context.fetch(FetchDescriptor<HistoryItemContent>(
+      predicate: #Predicate<HistoryItemContent> { $0.item == nil }
+    ))
     orphans.forEach(context.delete)
     result.orphansRemoved = orphans.count
     context.processPendingChanges()
 
     return result
+  }
+
+  // Restores an item's loaded contents and title.
+  private static func snapshot(of item: HistoryItem) -> () -> Void {
+    let contents = item.contents
+    let title = item.title
+    return {
+      item.contents = contents
+      item.title = title
+      item.clearDecodedImageCache()
+    }
   }
 
   // Removes or normalises the representations of one item that `allowList`

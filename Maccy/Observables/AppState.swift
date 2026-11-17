@@ -99,10 +99,11 @@ class AppState: Sendable {
     let nextUnselectedItem = history.nearestVisible(to: leadItem) { !$0.isSelected }
 
     withTransaction(Transaction()) {
-      navigator.selection.forEach { _, item in
-        history.delete(item)
+      // One save for the whole selection, so a failure is reported once and
+      // nothing is removed from the list.
+      if history.delete(navigator.selection.items) {
+        navigator.select(item: nextUnselectedItem)
       }
-      navigator.select(item: nextUnselectedItem)
     }
   }
 

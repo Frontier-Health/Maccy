@@ -1,36 +1,166 @@
 import AppKit.NSPasteboard
 import Foundation
+import SQLite3
 import SwiftData
 
 @MainActor
 class Storage {
-  static let shared = Storage()
+  // Replaced only by tests that need a store on disk (see
+  // `replaceSharedForTesting`).
+  private(set) static var shared = Storage()
+  static let defaultURL = URL.applicationSupportDirectory.appending(path: "Maccy/Storage.sqlite")
 
   var container: ModelContainer
   var context: ModelContext { container.mainContext }
+  let configuration: ModelConfiguration
   var size: String {
-    guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).allValues.first?.value as? Int64, size > 1 else {
+    guard let url = storeURL,
+          let size = try? url.resourceValues(forKeys: [.fileSizeKey]).allValues.first?.value as? Int64, size > 1 else {
       return ""
     }
 
     return ByteCountFormatter().string(fromByteCount: size)
   }
 
-  private let url = URL.applicationSupportDirectory.appending(path: "Maccy/Storage.sqlite")
+  // The SQLite file, or nil for a store kept in memory.
+  let storeURL: URL?
 
-  init() {
-    var config = ModelConfiguration(url: url)
+  // History never syncs to iCloud: CloudKit is turned off explicitly, so it
+  // stays off even if the app is later given CloudKit entitlements.
+  init(storeURL: URL = Storage.defaultURL) {
+    var config = ModelConfiguration(url: storeURL, cloudKitDatabase: .none)
+    var fileURL: URL? = storeURL
 
     #if DEBUG
-    if AppDelegate.isTesting {
-      config = ModelConfiguration(isStoredInMemoryOnly: true)
+    if AppDelegate.isTesting && storeURL == Self.defaultURL {
+      config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+      fileURL = nil
     }
     #endif
 
+    configuration = config
+    self.storeURL = fileURL
     do {
       container = try ModelContainer(for: HistoryItem.self, configurations: config)
     } catch let error {
       fatalError("Cannot load database: \(Notifier.redacted(error)).")
+    }
+  }
+
+  func allItems() throws -> [HistoryItem] {
+    try context.fetch(FetchDescriptor<HistoryItem>())
+  }
+
+  func unpinnedItems() throws -> [HistoryItem] {
+    try context.fetch(FetchDescriptor<HistoryItem>(predicate: #Predicate { $0.pin == nil }))
+  }
+
+  func items(lastCopiedBefore date: Date) throws -> [HistoryItem] {
+    try context.fetch(FetchDescriptor<HistoryItem>(predicate: #Predicate { $0.lastCopiedAt < date }))
+  }
+
+  func items(lastCopiedAfter date: Date) throws -> [HistoryItem] {
+    try context.fetch(FetchDescriptor<HistoryItem>(predicate: #Predicate { $0.lastCopiedAt > date }))
+  }
+
+  // Deletes `items` with their contents and, if asked, every content of no
+  // item, all in one save. All or nothing: changes already pending are saved
+  // first (so a failure can't discard them), then the deletion runs with
+  // autosave off. If its save fails, the deleted items get their contents back
+  // and the context is rolled back, so the store and the loaded models still
+  // hold every item, and the error is thrown. Every removal from history goes
+  // through here.
+  func delete(_ items: [HistoryItem], includingOrphanedContents: Bool = false) throws {
+    context.processPendingChanges()
+    if context.hasChanges {
+      try save()
+    }
+
+    let autosaveEnabled = context.autosaveEnabled
+    context.autosaveEnabled = false
+    defer { context.autosaveEnabled = autosaveEnabled }
+
+    let undo = CleanUpUndoLog()
+    do {
+      if includingOrphanedContents {
+        try context.fetch(FetchDescriptor<HistoryItemContent>(
+          predicate: #Predicate { $0.item == nil }
+        )).forEach(context.delete)
+      }
+      for item in items where item.modelContext != nil {
+        undo.recordContents(of: item)
+        item.contents.forEach(context.delete)
+        context.delete(item)
+      }
+      context.processPendingChanges()
+      if context.hasChanges {
+        try save()
+      }
+    } catch {
+      undo.restore()
+      context.rollback()
+      throw error
+    }
+  }
+
+  // Asks SQLite to compact the store after history was deleted: the WAL is
+  // checkpointed and truncated, the database is rebuilt with VACUUM, and the
+  // WAL is truncated again. Rows deleted before this then no longer sit in
+  // the WAL or in free pages of the database file.
+  //
+  // This is NOT secure erasure. The file system decides where the old bytes
+  // physically were and when they are overwritten; SSD wear levelling, APFS
+  // snapshots, Time Machine and other backups are out of Maccy's control.
+  //
+  // Mechanism: a second SQLite connection to the same file, opened read-write
+  // without create, through the system SQLite library that Core Data also
+  // uses, so both connections share SQLite's per-process file locks. It runs
+  // on the main actor, where every save of this store runs synchronously, so
+  // no SwiftData save is in flight. SQLite's own locking keeps the two
+  // connections consistent: VACUUM takes an exclusive lock and is atomic, so if
+  // it fails (for example SQLITE_BUSY after the timeout) the database is left
+  // exactly as it was and the error is thrown. A checkpoint that cannot finish
+  // reports busy, which is thrown too. Nothing here deletes or rewrites rows,
+  // so remaining items, pinned ones included, are kept either way.
+  func compact() throws {
+    guard let storeURL, FileManager.default.fileExists(atPath: storeURL.path) else {
+      return
+    }
+
+    var database: OpaquePointer?
+    let opened = sqlite3_open_v2(storeURL.path, &database, SQLITE_OPEN_READWRITE, nil)
+    defer { sqlite3_close_v2(database) }
+    guard opened == SQLITE_OK, let database else {
+      throw StorageCompactionError(code: opened)
+    }
+    sqlite3_busy_timeout(database, 2000)
+
+    try Self.checkpoint(database)
+    try Self.execute("VACUUM", in: database)
+    try Self.checkpoint(database)
+  }
+
+  private static func checkpoint(_ database: OpaquePointer) throws {
+    var statement: OpaquePointer?
+    let prepared = sqlite3_prepare_v2(database, "PRAGMA wal_checkpoint(TRUNCATE)", -1, &statement, nil)
+    defer { sqlite3_finalize(statement) }
+    guard prepared == SQLITE_OK else {
+      throw StorageCompactionError(code: prepared)
+    }
+    let stepped = sqlite3_step(statement)
+    guard stepped == SQLITE_ROW else {
+      throw StorageCompactionError(code: stepped)
+    }
+    // The first column is 1 if the checkpoint could not complete.
+    guard sqlite3_column_int(statement, 0) == 0 else {
+      throw StorageCompactionError(code: SQLITE_BUSY)
+    }
+  }
+
+  private static func execute(_ sql: String, in database: OpaquePointer) throws {
+    let result = sqlite3_exec(database, sql, nil, nil, nil)
+    guard result == SQLITE_OK else {
+      throw StorageCompactionError(code: result)
     }
   }
 
@@ -62,6 +192,15 @@ class Storage {
   #if DEBUG
   // Tests set this to make every `save()` throw it.
   var saveFailureForTesting: (any Error)?
+
+  // Makes `storage` the shared store and returns the one it replaces. Tests
+  // only: the history must be reloaded afterwards.
+  @discardableResult
+  static func replaceSharedForTesting(with storage: Storage) -> Storage {
+    let previous = shared
+    shared = storage
+    return previous
+  }
   #endif
 
   // Saves the context. Every save that can carry history content goes
@@ -410,4 +549,12 @@ struct StorageCleanUpResult {
       "\(impact.itemsRemoved) items removed, \(markersNormalised) markers normalised, " +
       "\(orphansRemoved) orphaned contents removed"
   }
+}
+
+// A compaction failure: the SQLite result code only.
+nonisolated struct StorageCompactionError: CustomNSError {
+  static let errorDomain = "MaccyStorageCompaction"
+  let code: Int32
+
+  var errorCode: Int { Int(code) }
 }

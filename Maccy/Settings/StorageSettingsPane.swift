@@ -84,18 +84,43 @@ struct StorageSettingsPane: View {
     }
   }
 
-  @Default(.size) private var size
   @Default(.sortBy) private var sortBy
+  // The effective values, refreshed whenever the preference changes, so a
+  // profile-forced or out-of-range value is shown as it is applied.
+  @State private var size = HistorySize.current
+  @State private var sizeIsForced = HistorySize.isForced
+  @State private var expiry = HistoryExpiry.current
 
   @State private var viewModel = ViewModel()
   @State private var storageSize = Storage.shared.size
 
   private let sizeFormatter: NumberFormatter = {
     let formatter = NumberFormatter()
-    formatter.minimum = 1
-    formatter.maximum = 999
+    formatter.minimum = NSNumber(value: HistorySize.range.lowerBound)
+    formatter.maximum = NSNumber(value: HistorySize.range.upperBound)
     return formatter
   }()
+
+  private let expiryFormatter: NumberFormatter = {
+    let formatter = NumberFormatter()
+    formatter.minimum = 0
+    formatter.maximum = NSNumber(value: HistoryExpiry.maximumHours)
+    return formatter
+  }()
+
+  private var sizeBinding: Binding<Int> {
+    Binding(
+      get: { size },
+      set: { Defaults[.size] = min(max($0, HistorySize.range.lowerBound), HistorySize.range.upperBound) }
+    )
+  }
+
+  private var expiryBinding: Binding<Int> {
+    Binding(
+      get: { expiry.hours ?? 0 },
+      set: { Defaults[.historyExpiryHours] = min(max($0, 0), HistoryExpiry.maximumHours) }
+    )
+  }
 
   var body: some View {
     Settings.Container(contentWidth: 450) {
@@ -126,13 +151,20 @@ struct StorageSettingsPane: View {
 
       Settings.Section(label: { Text("Size", tableName: "StorageSettings") }) {
         HStack {
-          TextField("", value: $size, formatter: sizeFormatter)
+          TextField("", value: sizeBinding, formatter: sizeFormatter)
             .frame(width: 80)
             .help(Text("SizeTooltip", tableName: "StorageSettings"))
             .accessibilityLabel(Text("Size", tableName: "StorageSettings"))
-          Stepper("", value: $size, in: 1...999)
+            .disabled(sizeIsForced)
+          Stepper("", value: sizeBinding, in: HistorySize.range)
             .labelsHidden()
             .accessibilityLabel(Text("Size", tableName: "StorageSettings"))
+            .disabled(sizeIsForced)
+          if sizeIsForced {
+            Image(systemName: "lock.fill")
+              .help(Self.managedValue)
+              .accessibilityLabel(Self.managedValue)
+          }
           Text(storageSize)
             .controlSize(.small)
             .foregroundStyle(.gray)
@@ -141,6 +173,50 @@ struct StorageSettingsPane: View {
               storageSize = Storage.shared.size
             }
         }
+        .task {
+          for await _ in Defaults.updates(.size) {
+            size = HistorySize.current
+            sizeIsForced = HistorySize.isForced
+          }
+        }
+      }
+
+      Settings.Section(label: { Text(Self.expiryLabel) }) {
+        HStack {
+          TextField("", value: expiryBinding, formatter: expiryFormatter)
+            .frame(width: 80)
+            .accessibilityLabel(Text(Self.expiryLabel))
+            .disabled(expiry.isForced)
+          Stepper("", value: expiryBinding, in: 0...HistoryExpiry.maximumHours)
+            .labelsHidden()
+            .accessibilityLabel(Text(Self.expiryLabel))
+            .disabled(expiry.isForced)
+          Text(Self.expiryUnit)
+          if expiry.isForced {
+            Image(systemName: "lock.fill")
+              .help(Self.managedValue)
+              .accessibilityLabel(Self.managedValue)
+          }
+        }
+        .task {
+          for await _ in Defaults.updates(.historyExpiryHours) {
+            expiry = HistoryExpiry.current
+          }
+        }
+        Text(Self.expiryDescription(expiry))
+          .fixedSize(horizontal: false, vertical: true)
+          .controlSize(.small)
+          .foregroundStyle(expiry.isInvalid ? Color.red : Color.gray)
+        if let failedAt = History.shared.automaticRemovalFailedAt {
+          Text(Self.automaticRemovalFailed(at: failedAt))
+            .fixedSize(horizontal: false, vertical: true)
+            .controlSize(.small)
+            .foregroundStyle(.red)
+        }
+        Text(Self.compactionNote)
+          .fixedSize(horizontal: false, vertical: true)
+          .controlSize(.small)
+          .foregroundStyle(.gray)
       }
 
       Settings.Section(label: { Text("SortBy", tableName: "StorageSettings") }) {
@@ -206,6 +282,74 @@ struct StorageSettingsPane: View {
     localized(
       "ManagedSaveTypes",
       "These settings are controlled by a configuration profile. Only your administrator can change them."
+    )
+  }
+
+  private static var managedValue: String {
+    localized("ManagedValue", "Set by your administrator in a configuration profile.")
+  }
+
+  private static var expiryLabel: String {
+    localized("Expiry", "Remove after:")
+  }
+
+  private static var expiryUnit: String {
+    localized("ExpiryUnit", "hours (0 = never)")
+  }
+
+  static func expiryDescription(_ expiry: HistoryExpiry) -> String {
+    switch (expiry.state, expiry.isForced) {
+    case (.off, false):
+      return localized(
+        "ExpiryOff",
+        "Items are kept until you delete them or the history size is reached. Set a number of hours to remove " +
+          "items you have not copied for that long (copying an item from Maccy counts). Pinned items are kept."
+      )
+    case (.off, true):
+      return localized(
+        "ExpiryOffManaged",
+        "Your administrator has turned automatic removal off."
+      )
+    case (.hours(let hours), false):
+      return String(format: localized(
+        "ExpiryOn",
+        "Items you have not copied for %lld hours are removed (copying an item from Maccy counts). Pinned " +
+          "items are kept. Checked at launch and every few minutes."
+      ), Int64(hours))
+    case (.hours(let hours), true):
+      return String(format: localized(
+        "ExpiryOnManaged",
+        "Set by your administrator: items not copied for %lld hours are removed, including pinned items. " +
+          "Checked at launch and every few minutes."
+      ), Int64(hours))
+    case (.invalid, false):
+      return String(format: localized(
+        "ExpiryInvalid",
+        "The saved expiry value is invalid. Until it is fixed, Maccy removes items not copied for %lld hour. " +
+          "Pinned items are kept. Enter a number of hours, or 0 to turn this off."
+      ), Int64(HistoryExpiry.invalidValueHours))
+    case (.invalid, true):
+      return String(format: localized(
+        "ExpiryInvalidManaged",
+        "The expiry value in your configuration profile is invalid. Until your administrator fixes it, Maccy " +
+          "removes items not copied for %lld hour, including pinned items."
+      ), Int64(HistoryExpiry.invalidValueHours))
+    }
+  }
+
+  private static func automaticRemovalFailed(at date: Date) -> String {
+    String(format: localized(
+      "AutomaticRemovalFailed",
+      "Automatic removal last failed at %@. Items that should have been removed are still stored. Maccy " +
+        "keeps trying."
+    ), date.formatted(date: .abbreviated, time: .shortened))
+  }
+
+  private static var compactionNote: String {
+    localized(
+      "CompactionNote",
+      "After clearing history or removing expired items, Maccy asks its database to compact. This is not " +
+        "secure erasure: copies can remain on the disk, in APFS snapshots, in Time Machine and in other backups."
     )
   }
 

@@ -89,6 +89,41 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @ObservationIgnored
   private var failedStoragePolicy: StoragePolicy?
 
+  // Shows removal failures to the user. Tests replace it.
+  @ObservationIgnored
+  static var removalFailureReporter: any HistoryRemovalFailureReporting = AlertHistoryRemovalFailureReporter()
+  // When an automatic removal (trim, expiry, clear at launch) last failed, or
+  // nil once one succeeds. Shown in the Storage settings.
+  private(set) var automaticRemovalFailedAt: Date?
+  // Whether the current run of automatic-removal failures was already shown.
+  @ObservationIgnored
+  private var automaticRemovalFailureShown = false
+
+  // Where the expiry setting is read from, and the clock it is measured with.
+  // Tests replace both.
+  @ObservationIgnored
+  var expiryPreferences: UserDefaults = Defaults.Keys.historyExpiryHours.suite
+  @ObservationIgnored
+  var now: () -> Date = { Date.now }
+  @ObservationIgnored
+  private var expiryTimer: Timer?
+  @ObservationIgnored
+  private var expiryObservers: [any NSObjectProtocol] = []
+  // A purge removed items since the store was last compacted, and when it was
+  // (system uptime, so a clock change can't defer it forever).
+  @ObservationIgnored
+  private var expiryCompactionPending = false
+  @ObservationIgnored
+  private var lastExpiryCompaction: TimeInterval?
+
+  // How often the expiry purge runs while Maccy is running, and how often at
+  // most it compacts the store afterwards.
+  static let expiryCheckInterval: TimeInterval = 5 * 60
+  static let expiryCompactionInterval: TimeInterval = 60 * 60
+  // An item last copied later than this ahead of the clock was stamped before
+  // the clock was set back.
+  static let futureTimestampTolerance: TimeInterval = 10 * 60
+
 #if DEBUG
   static let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 #endif
@@ -155,7 +190,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     filteredPinnedItems = allPinnedItems
     filteredUnpinnedItems = allUnpinnedItems
 
-    limitHistorySize(to: Defaults[.size])
+    limitHistorySize(to: HistorySize.current)
 
     updateShortcuts()
     // Ensure that panel size is proper *after* loading all items.
@@ -243,11 +278,15 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     return result.hasChanges
   }
 
+  // Removes the unpinned items beyond `maxSize` (at least 0). If that fails
+  // they stay, in the store and in the list.
   @MainActor
   private func limitHistorySize(to maxSize: Int) {
-    if allUnpinnedItems.count >= maxSize {
-      allUnpinnedItems[maxSize...].forEach(delete)
+    let maxSize = max(0, maxSize)
+    guard allUnpinnedItems.count > maxSize else {
+      return
     }
+    remove(allUnpinnedItems[maxSize...].map(\.item), as: .trim)
   }
 
   // Applies the storage policy, read now, to a new item and only then inserts
@@ -348,7 +387,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
     // Remove exceeding items. Do this after the item is added to avoid removing something
     // if a duplicate was found as then the size already stayed the same.
-    limitHistorySize(to: item.pin == nil ? Defaults[.size] - 1 : Defaults[.size])
+    let size = HistorySize.current
+    limitHistorySize(to: item.pin == nil ? size - 1 : size)
 
     sessionLog[Clipboard.shared.changeCount] = item
 
@@ -374,108 +414,327 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     return itemDecorator
   }
 
-  @MainActor
-  private func withLogging(_ msg: String, _ block: () throws -> Void) rethrows {
-    func dataCounts() -> String {
-      let historyItemCount = try? Storage.shared.context.fetchCount(FetchDescriptor<HistoryItem>())
-      let historyContentCount = try? Storage.shared.context.fetchCount(FetchDescriptor<HistoryItemContent>())
-      return "HistoryItem=\(historyItemCount ?? 0) HistoryItemContent=\(historyContentCount ?? 0)"
-    }
+  // MARK: Removal
+  //
+  // Every removal (delete, clear, clear all, clear on quit or at launch,
+  // trimming to the history size, expiry) goes through `remove(_:as:)`: the
+  // store is changed first, all or nothing (`Storage.delete`), and only once
+  // that save succeeded are the items taken out of the list and their
+  // notifications and intent image exports revoked. If it fails, the store,
+  // the list, notifications and exports are all left as they were, and the
+  // failure is reported (see `HistoryRemoval.alertsEveryTime`).
 
-    logger.info("\(msg) Before: \(dataCounts())")
-    try? block()
-    logger.info("\(msg) After: \(dataCounts())")
+  // Clears unpinned items. Returns whether history was cleared.
+  @MainActor
+  @discardableResult
+  func clear() -> Bool {
+    clearUnpinned(as: .clear)
+  }
+
+  // Clears unpinned items when Maccy quits with "Clear history on quit" on.
+  @MainActor
+  @discardableResult
+  func clearOnQuit() -> Bool {
+    clearUnpinned(as: .clearOnQuit)
   }
 
   @MainActor
-  func clear() {
-    IntentImageExports.removeAll()
-    withLogging("Clearing history") {
-      allUnpinnedItems.forEach(cleanup)
-      allUnpinnedItems.removeAll()
-      filteredUnpinnedItems.removeAll()
-      sessionLog.removeValues { $0.pin == nil }
-
-      try? Storage.shared.context.transaction {
-        try? Storage.shared.context.delete(
-          model: HistoryItem.self,
-          where: #Predicate { $0.pin == nil }
-        )
-        try? Storage.shared.context.delete(
-          model: HistoryItemContent.self,
-          where: #Predicate { $0.item?.pin == nil }
-        )
-      }
-      Storage.shared.context.processPendingChanges()
-      try? Storage.shared.context.save()
+  @discardableResult
+  private func clearUnpinned(as removal: HistoryRemoval) -> Bool {
+    let cleared: Bool
+    do {
+      cleared = remove(try Storage.shared.unpinnedItems(), includingOrphanedContents: true, as: removal)
+    } catch {
+      reportRemovalFailure(removal, error)
+      cleared = false
     }
 
-    Clipboard.shared.clear()
-    AppState.shared.popup.close()
-    Task {
-      AppState.shared.popup.needsResize = true
+    if cleared {
+      IntentImageExports.removeAll()
+      compactStore(after: removal)
     }
+    if removal != .clearOnLaunch {
+      Clipboard.shared.clear()
+      AppState.shared.popup.close()
+    }
+    return cleared
   }
 
+  // Clears every item, pinned ones included. Returns whether history was
+  // cleared.
   @MainActor
-  func clearAll() {
-    IntentImageExports.removeAll()
-    withLogging("Clearing all history") {
-      allPinnedItems.forEach(cleanup)
-      allUnpinnedItems.forEach(cleanup)
-      allUnpinnedItems.removeAll()
-      filteredPinnedItems.removeAll()
-      filteredUnpinnedItems.removeAll()
+  @discardableResult
+  func clearAll() -> Bool {
+    let cleared: Bool
+    do {
+      cleared = remove(try Storage.shared.allItems(), includingOrphanedContents: true, as: .clearAll)
+    } catch {
+      reportRemovalFailure(.clearAll, error)
+      cleared = false
+    }
+
+    if cleared {
       pinManager.removeAll()
       sessionLog.removeAll()
       Notifier.removeAllDelivered()
-
-      do {
-        let context = Storage.shared.context
-        try context.transaction {
-          // Bulk deletion cannot remove children with live inverse relationships.
-          try context.delete(
-            model: HistoryItemContent.self,
-            where: #Predicate { $0.item == nil }
-          )
-          try context.delete(model: HistoryItem.self)
-          try context.delete(model: HistoryItemContent.self)
-        }
-      } catch {
-        logger.error("Failed to clear storage: \(Notifier.redacted(error))")
-      }
-      Storage.shared.context.processPendingChanges()
-      try? Storage.shared.context.save()
+      IntentImageExports.removeAll()
+      compactStore(after: .clearAll)
     }
-
     Clipboard.shared.clear()
     AppState.shared.popup.close()
-    Task {
-      AppState.shared.popup.needsResize = true
-    }
+    return cleared
+  }
+
+  // Deletes one item. Returns whether it was deleted.
+  @MainActor
+  @discardableResult
+  func delete(_ item: HistoryItemDecorator?) -> Bool {
+    guard let item else { return false }
+    return delete([item])
+  }
+
+  // Deletes several items in one save, so a failure is reported once.
+  @MainActor
+  @discardableResult
+  func delete(_ items: [HistoryItemDecorator]) -> Bool {
+    guard !items.isEmpty else { return true }
+    return remove(items.map(\.item), as: .delete)
   }
 
   @MainActor
-  func delete(_ item: HistoryItemDecorator?) {
-    guard let item else { return }
+  @discardableResult
+  private func remove(
+    _ items: [HistoryItem],
+    includingOrphanedContents: Bool = false,
+    as removal: HistoryRemoval
+  ) -> Bool {
+    let removedIDs = Set(items.map { ObjectIdentifier($0) })
+    func isRemoved(_ decorator: HistoryItemDecorator) -> Bool {
+      removedIDs.contains(ObjectIdentifier(decorator.item))
+    }
+    let decorators = (allPinnedItems + allUnpinnedItems).filter(isRemoved)
 
-    cleanup(item)
-    withLogging("Removing history item") {
-      deleteFromStorage(item.item)
-      Storage.shared.context.processPendingChanges()
-      try? Storage.shared.context.save()
+    do {
+      try Storage.shared.delete(items, includingOrphanedContents: includingOrphanedContents)
+    } catch {
+      reportRemovalFailure(removal, error)
+      return false
     }
 
-    pinManager.remove(item)
-    allUnpinnedItems.removeAll { $0 == item }
-    filteredPinnedItems.removeAll { $0 == item }
-    filteredUnpinnedItems.removeAll { $0 == item }
-    sessionLog.removeValues { $0 == item.item }
+    if !removal.alertsEveryTime {
+      automaticRemovalFailedAt = nil
+      automaticRemovalFailureShown = false
+    }
 
+    for item in items {
+      IntentImageExports.remove(for: item)
+      Notifier.removeDelivered(for: item)
+    }
+    for decorator in decorators {
+      decorator.cleanupImages()
+      pinManager.remove(decorator)
+    }
+    allUnpinnedItems.removeAll(where: isRemoved)
+    filteredPinnedItems.removeAll(where: isRemoved)
+    filteredUnpinnedItems.removeAll(where: isRemoved)
+    sessionLog.removeValues { removedIDs.contains(ObjectIdentifier($0)) }
+
+    if !items.isEmpty {
+      logger.info("Removed \(items.count) history items (\(removal.rawValue))")
+    }
     updateUnpinnedShortcuts()
     Task {
       AppState.shared.popup.needsResize = true
     }
+    return true
+  }
+
+  // Logs the failure by domain and code only, records it, and tells the user:
+  // every time for a removal they asked for, once per run of failures for an
+  // automatic one.
+  @MainActor
+  private func reportRemovalFailure(_ removal: HistoryRemoval, _ error: any Error) {
+    logger.error("""
+      Failed to remove history items (\(removal.rawValue)): \(Notifier.redacted(error)). \
+      Nothing was removed; history is unchanged.
+      """)
+    if removal.alertsEveryTime {
+      Self.removalFailureReporter.removalFailed(removal, error: error)
+      return
+    }
+
+    automaticRemovalFailedAt = now()
+    if !automaticRemovalFailureShown {
+      automaticRemovalFailureShown = true
+      Self.removalFailureReporter.removalFailed(removal, error: error)
+    }
+  }
+
+  // See `Storage.compact()`: not secure erasure. A failure is logged only:
+  // history itself was removed.
+  @MainActor
+  private func compactStore(after removal: HistoryRemoval) {
+    do {
+      try Storage.shared.compact()
+      logger.info("Compacted the history database (\(removal.rawValue))")
+    } catch {
+      logger.error("Could not compact the history database (\(removal.rawValue)): \(Notifier.redacted(error))")
+    }
+  }
+
+  // MARK: Expiry and launch
+
+  // Runs once at launch, before the history is first shown: clears unpinned
+  // items if "Clear history on quit" is on (so a crash or force quit doesn't
+  // leave history behind), purges expired items, then loads history, which
+  // trims it to the history size.
+  @MainActor
+  func performLaunchMaintenance() {
+    if Defaults[.clearOnQuit] {
+      clearUnpinned(as: .clearOnLaunch)
+    }
+    runExpiry()
+    try? reloadItems()
+  }
+
+  #if DEBUG
+  // Tests start each case with no earlier automatic-removal failure recorded.
+  func resetAutomaticRemovalFailuresForTesting() {
+    automaticRemovalFailedAt = nil
+    automaticRemovalFailureShown = false
+    expiryCompactionPending = false
+    lastExpiryCompaction = nil
+  }
+
+  var isExpiryScheduled: Bool { expiryTimer != nil || !expiryObservers.isEmpty }
+  #endif
+
+  // Runs the expiry purge every `expiryCheckInterval` while Maccy runs,
+  // whether or not the window is ever opened, and straight away after the Mac
+  // wakes, after the system clock changes and after the setting changes.
+  @MainActor
+  func startExpirySchedule() {
+    #if DEBUG
+    // Tests run the purge themselves, with their own clock and preferences.
+    guard !Self.isRunningUnitTests else { return }
+    #endif
+
+    expiryTimer?.invalidate()
+    let timer = Timer(timeInterval: Self.expiryCheckInterval, repeats: true) { _ in
+      MainActor.assumeIsolated {
+        History.shared.runExpiry()
+      }
+    }
+    timer.tolerance = 30
+    RunLoop.main.add(timer, forMode: .common)
+    expiryTimer = timer
+
+    expiryObservers.forEach {
+      NSWorkspace.shared.notificationCenter.removeObserver($0)
+      NotificationCenter.default.removeObserver($0)
+    }
+    expiryObservers = [
+      NSWorkspace.shared.notificationCenter.addObserver(
+        forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+      ) { _ in
+        MainActor.assumeIsolated {
+          History.shared.runExpiry()
+        }
+      },
+      NotificationCenter.default.addObserver(
+        forName: .NSSystemClockDidChange, object: nil, queue: .main
+      ) { _ in
+        MainActor.assumeIsolated {
+          History.shared.runExpiry()
+        }
+      }
+    ]
+    Task {
+      for await _ in Defaults.updates(.historyExpiryHours, initial: false) {
+        runExpiry()
+      }
+    }
+  }
+
+  // One scheduled run: purges, then compacts the store if a purge removed
+  // something and the last compaction after a purge was at least
+  // `expiryCompactionInterval` ago (VACUUM rewrites the whole file).
+  @MainActor
+  func runExpiry() {
+    if let removed = purgeExpiredItems(), removed > 0 {
+      expiryCompactionPending = true
+    }
+    let uptime = ProcessInfo.processInfo.systemUptime
+    if expiryCompactionPending,
+       lastExpiryCompaction.map({ uptime - $0 >= Self.expiryCompactionInterval }) ?? true {
+      expiryCompactionPending = false
+      lastExpiryCompaction = uptime
+      compactStore(after: .expiry)
+    }
+  }
+
+  // Compacts the store if a purge removed items since the last compaction.
+  @MainActor
+  func compactIfExpiryRemovedItems() {
+    guard expiryCompactionPending else { return }
+    expiryCompactionPending = false
+    compactStore(after: .expiry)
+  }
+
+  // Removes items last copied more than the expiry ago (see `HistoryExpiry`
+  // for how the setting is read and when pinned items expire). Returns how
+  // many were removed, or nil if that failed.
+  //
+  // Measured against `now()`. A clock set forwards purges early, the safe
+  // direction. A clock set backwards would leave items stamped "in the
+  // future" unexpired for as long as it was moved, so an item last copied
+  // more than `futureTimestampTolerance` ahead of the clock is restamped as
+  // copied now: it then expires after the expiry time at the latest.
+  @MainActor
+  @discardableResult
+  func purgeExpiredItems() -> Int? {
+    let expiry = HistoryExpiry.effective(in: expiryPreferences)
+    let currentTime = now()
+    guard let cutoff = expiry.cutoff(now: currentTime) else {
+      return 0
+    }
+
+    let expired: [HistoryItem]
+    do {
+      try restampFutureItems(now: currentTime)
+      expired = try Storage.shared.items(lastCopiedBefore: cutoff)
+        .filter { expiry.expiresPinnedItems || $0.pin == nil }
+    } catch {
+      reportRemovalFailure(.expiry, error)
+      return nil
+    }
+
+    guard !expired.isEmpty else {
+      return 0
+    }
+    guard remove(expired, as: .expiry) else {
+      return nil
+    }
+    return expired.count
+  }
+
+  @MainActor
+  private func restampFutureItems(now: Date) throws {
+    let future = try Storage.shared.items(lastCopiedAfter: now.addingTimeInterval(Self.futureTimestampTolerance))
+    guard !future.isEmpty else {
+      return
+    }
+
+    let stamps = future.map(\.lastCopiedAt)
+    future.forEach { $0.lastCopiedAt = now }
+    do {
+      Storage.shared.context.processPendingChanges()
+      try Storage.shared.save()
+    } catch {
+      zip(future, stamps).forEach { $0.lastCopiedAt = $1 }
+      throw error
+    }
+    logger.notice("Restamped \(future.count) history items copied after the current time")
   }
 
   @MainActor
@@ -494,13 +753,6 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   private func deleteContents(of item: HistoryItem) {
     item.contents.forEach(Storage.shared.context.delete)
-  }
-
-  @MainActor
-  private func cleanup(_ item: HistoryItemDecorator) {
-    IntentImageExports.remove(for: item.item)
-    item.cleanupImages()
-    Notifier.removeDelivered(for: item.item)
   }
 
   @MainActor

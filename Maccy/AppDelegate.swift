@@ -121,6 +121,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
       ContentView()
     }
+
+    // After the storage policy is applied (in migrateUserDefaults): clear on
+    // quit (if a crash or force quit skipped it), expiry and the size limit
+    // run once now, and expiry keeps running while Maccy is open.
+    History.shared.performLaunchMaintenance()
+    History.shared.startExpirySchedule()
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -130,8 +136,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     if Defaults[.clearOnQuit] {
-      AppState.shared.history.clear()
+      // A failure is shown before Maccy quits, and the clear runs again at
+      // the next launch.
+      AppState.shared.history.clearOnQuit()
     }
+    AppState.shared.history.compactIfExpiryRemovedItems()
   }
 
   private func ensureMigration(key: String, _ action: () -> Void) {

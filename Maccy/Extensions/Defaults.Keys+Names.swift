@@ -68,7 +68,13 @@ nonisolated extension Defaults.Keys {
   static let searchVisibility = Key<SearchVisibility>("searchVisibility", default: .always, suite: preferencesSuite)
   static let showSpecialSymbols = Key<Bool>("showSpecialSymbols", default: true, suite: preferencesSuite)
   static let showTitle = Key<Bool>("showTitle", default: true, suite: preferencesSuite)
-  static let size = Key<Int>("historySize", default: 200, suite: preferencesSuite)
+  // Write-only for the Storage settings. Read it only through
+  // HistorySize.effective(in:), which clamps it to 1...999 whatever its type.
+  static let size = Key<Int>(HistorySize.preferenceKey, default: HistorySize.defaultValue, suite: preferencesSuite)
+  // Write-only for the Storage settings; declared so changes can be observed.
+  // Read it only through HistoryExpiry.effective(in:), which handles a forced,
+  // negative or wrong-type value (see HistoryExpiry).
+  static let historyExpiryHours = Key<Int>(HistoryExpiry.preferenceKey, default: 0, suite: preferencesSuite)
   static let sortBy = Key<Sorter.By>("sortBy", default: .lastCopiedAt, suite: preferencesSuite)
   static let suppressClearAlert = Key<Bool>("suppressClearAlert", default: false, suite: preferencesSuite)
   static let windowSize = Key<NSSize>("windowSize", default: NSSize(width: 450, height: 800), suite: preferencesSuite)

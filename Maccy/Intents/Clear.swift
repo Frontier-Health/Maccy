@@ -22,7 +22,9 @@ struct Clear: AppIntent, CustomIntentMigratedAppIntent {
 
     try await MainActor.run {
       try HistoryIntentAccess.requireEnabled()
-      AppState.shared.history.clear()
+      guard AppState.shared.history.clear() else {
+        throw AppIntentError.storageFailure
+      }
     }
     return .result()
   }

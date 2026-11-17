@@ -20,7 +20,9 @@ struct Delete: AppIntent, CustomIntentMigratedAppIntent {
       try HistoryIntentAccess.requireEnabled()
       let item = try HistoryIntentAccess.item(number: number, in: AppState.shared.history.items)
 
-      AppState.shared.history.delete(item)
+      guard AppState.shared.history.delete(item) else {
+        throw AppIntentError.storageFailure
+      }
     }
 
     return .result()

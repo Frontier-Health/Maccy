@@ -798,10 +798,13 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     }
   }
 
-  // Waits for the compaction in progress, if any. For quitting and tests.
+  // Waits until no compaction is in progress, including one started when the
+  // previous one finished. For tests.
   @MainActor
   func waitForCompaction() async {
-    await compactionTask?.value
+    while let compactionTask {
+      await compactionTask.value
+    }
   }
 
   @MainActor
@@ -842,6 +845,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
         """)
       recordFailure(.compaction, showing: nil, error: error)
     }
+    // A request made while this one ran (it can't start while one runs).
+    compactIfDue()
   }
 
   // At quit: runs a pending compaction on this thread, giving up after

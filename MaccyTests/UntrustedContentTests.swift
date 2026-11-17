@@ -791,9 +791,11 @@ extension SharedStateTests {
       UniversalClipboardFile.readObserverForTesting = { reads.record($0) }
 
       let item = universalClipboardItem(url)
-      async let thumbnail = item.decodedImage(for: .thumbnail)
-      async let preview = item.decodedImage(for: .preview)
-      let (first, second) = await (thumbnail, preview)
+      // Both start before either read finishes.
+      let thumbnail = Task { @MainActor in await item.decodedImage(for: .thumbnail) }
+      let preview = Task { @MainActor in await item.decodedImage(for: .preview) }
+      let first = await thumbnail.value
+      let second = await preview.value
       #expect(first != nil)
       #expect(second != nil)
       #expect(reads.values.count == 1)

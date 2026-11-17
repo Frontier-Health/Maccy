@@ -761,6 +761,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return
     }
 
+    // A selection still waiting for a shortcut key is replaced by this one.
+    AppState.shared.popup.deferredSelection.cancel()
+
     if modifierFlags.isEmpty {
       AppState.shared.popup.close()
       Clipboard.shared.copy(item.item, removeFormatting: Defaults[.removeFormattingByDefault])

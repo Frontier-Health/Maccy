@@ -15,6 +15,39 @@ enum PopupState {
   case opening
 }
 
+// A selection made with a shortcut key waits a moment so the highlight shows
+// first. It uses the modifier keys held when the key was pressed, and it is
+// dropped if the popup closes or anything else is done before it runs, so it
+// can't paste into another app or act on an item that is gone.
+@MainActor
+final class DeferredSelection {
+  static let delay: Duration = .milliseconds(50)
+
+  private var task: Task<Void, Never>?
+
+  var isPending: Bool { task != nil }
+
+  func schedule(
+    flags: NSEvent.ModifierFlags,
+    after delay: Duration = DeferredSelection.delay,
+    perform action: @escaping @MainActor (NSEvent.ModifierFlags) -> Void
+  ) {
+    cancel()
+    task = Task { [weak self] in
+      try? await Task.sleep(for: delay)
+      guard !Task.isCancelled else { return }
+
+      self?.task = nil
+      action(flags)
+    }
+  }
+
+  func cancel() {
+    task?.cancel()
+    task = nil
+  }
+}
+
 @Observable
 class Popup {
   static let verticalSeparatorPadding = 6.0
@@ -49,6 +82,8 @@ class Popup {
     return suitableHeight(for: 3 * Popup.itemHeight)
   }
 
+  let deferredSelection = DeferredSelection()
+
   private var eventsMonitor: Any?
 
   private var state: PopupState = .toggle
@@ -82,6 +117,7 @@ class Popup {
   }
 
   func reset() {
+    deferredSelection.cancel()
     state = .toggle
     KeyboardShortcuts.enable(.popup)
   }

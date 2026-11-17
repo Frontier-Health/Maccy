@@ -33,6 +33,63 @@ extension SharedStateTests {
       Defaults[.pinTo] = savedPinTo
     }
 
+    // MARK: Deferred selection (a shortcut key selects after a short delay)
+
+    @MainActor
+    final class SelectionLog {
+      var flags: [NSEvent.ModifierFlags] = []
+    }
+
+    @Test("A deferred selection runs once, with the modifier keys held when it was scheduled")
+    func deferredSelectionUsesTheFlagsItWasScheduledWith() async throws {
+      let deferred = DeferredSelection()
+      let log = SelectionLog()
+      deferred.schedule(flags: [.command, .shift], after: .milliseconds(10)) { log.flags.append($0) }
+      #expect(deferred.isPending)
+      #expect(log.flags.isEmpty)
+
+      try await Task.sleep(for: .milliseconds(300))
+      #expect(log.flags == [[.command, .shift]])
+      #expect(!deferred.isPending)
+    }
+
+    @Test("A cancelled deferred selection never runs")
+    func cancelledDeferredSelectionNeverRuns() async throws {
+      let deferred = DeferredSelection()
+      let log = SelectionLog()
+      deferred.schedule(flags: [], after: .milliseconds(10)) { log.flags.append($0) }
+      deferred.cancel()
+      #expect(!deferred.isPending)
+
+      try await Task.sleep(for: .milliseconds(300))
+      #expect(log.flags.isEmpty)
+    }
+
+    @Test("A new deferred selection replaces the one still waiting")
+    func newDeferredSelectionReplacesThePendingOne() async throws {
+      let deferred = DeferredSelection()
+      let log = SelectionLog()
+      deferred.schedule(flags: [.option], after: .milliseconds(10)) { log.flags.append($0) }
+      deferred.schedule(flags: [.command], after: .milliseconds(10)) { log.flags.append($0) }
+
+      try await Task.sleep(for: .milliseconds(300))
+      #expect(log.flags == [[.command]])
+    }
+
+    @Test("Closing the popup drops a selection that is still waiting")
+    func closingThePopupDropsThePendingSelection() async throws {
+      let popup = AppState.shared.popup
+      let log = SelectionLog()
+      popup.deferredSelection.schedule(flags: [.command], after: .milliseconds(10)) { log.flags.append($0) }
+
+      // The panel calls this when it closes.
+      popup.reset()
+      #expect(!popup.deferredSelection.isPending)
+
+      try await Task.sleep(for: .milliseconds(300))
+      #expect(log.flags.isEmpty)
+    }
+
     @Test("Default is empty")
     func defaultIsEmpty() {
       #expect(history.items.toArray() == [])

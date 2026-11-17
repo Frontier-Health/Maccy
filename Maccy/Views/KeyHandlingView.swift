@@ -12,6 +12,10 @@ struct KeyHandlingView<Content: View>: View {
   var body: some View {
     content()
       .onKeyPress { _ in
+        // Any other key press is a new action: a selection still waiting for
+        // an earlier shortcut key is dropped.
+        appState.popup.deferredSelection.cancel()
+
         guard !appState.isEditingItem else { return .ignored }
 
         // Unfortunately, key presses don't allow access to
@@ -164,9 +168,9 @@ struct KeyHandlingView<Content: View>: View {
 
         if let item = appState.history.pressedShortcutItem {
           appState.navigator.select(item: item)
-          Task {
-            try? await Task.sleep(for: .milliseconds(50))
-            appState.history.select(item, flags: .currentModifierFlags)
+          // The modifier keys now, not when the selection runs.
+          appState.popup.deferredSelection.schedule(flags: .currentModifierFlags) { flags in
+            appState.history.select(item, flags: flags)
           }
           return .handled
         }

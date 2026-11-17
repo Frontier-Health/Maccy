@@ -87,6 +87,9 @@ class HistoryItem {
   // whenever the title is set. Rows stored before it existed read as unknown.
   private var titleSourceValue = HistoryItemTitleSource.unknown.rawValue
 
+  /// Opaque identifier used for this item's delivered notification. Random, never derived from content.
+  @Transient var notificationID = UUID().uuidString
+
   @Relationship(deleteRule: .cascade, inverse: \HistoryItemContent.item)
   var contents: [HistoryItemContent] = []
 
@@ -599,7 +602,7 @@ class HistoryItem {
     do {
       try requestHandler.perform([request])
     } catch {
-      print("Unable to perform the request: \(error).")
+      print("Unable to perform the request: \(Notifier.redacted(error)).")
       return nil
     }
 

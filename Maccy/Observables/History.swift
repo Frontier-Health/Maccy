@@ -284,6 +284,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       context.processPendingChanges()
       return false
     }
+    logger.info("Inserted history item \(item.notificationID)")
     return true
   }
 
@@ -320,9 +321,12 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       if !item.fromMaccy {
         item.application = existingHistoryItem.application
       }
-      logger.info("Removing duplicate item")
+      logger.info("Removing duplicate of history item \(item.notificationID)")
+      // The surviving item takes over the duplicate's notification, so a notification already
+      // submitted for the duplicate (for example when copying from history) stays removable.
+      item.notificationID = existingHistoryItem.notificationID
       if let existingDecorator = firstStoredItem(where: { $0.item == existingHistoryItem }) {
-        cleanup(existingDecorator)
+        existingDecorator.cleanupImages()
         allUnpinnedItems.removeAll { $0 == existingDecorator }
         if existingDecorator.isPinned {
           replacedPinnedItem = existingDecorator
@@ -330,9 +334,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       }
       deleteFromStorage(existingHistoryItem)
     } else {
-      let body = Notifier.body(for: item)
       Task {
-        Notifier.notify(body: body, sound: .write)
+        Notifier.notify(for: item, sound: .write)
       }
     }
 
@@ -416,6 +419,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       filteredUnpinnedItems.removeAll()
       pinManager.removeAll()
       sessionLog.removeAll()
+      Notifier.removeAllDelivered()
 
       do {
         let context = Storage.shared.context
@@ -429,7 +433,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
           try context.delete(model: HistoryItemContent.self)
         }
       } catch {
-        logger.error("Failed to clear storage: \(String(reflecting: error))")
+        logger.error("Failed to clear storage: \(Notifier.redacted(error))")
       }
       Storage.shared.context.processPendingChanges()
       try? Storage.shared.context.save()
@@ -486,6 +490,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   private func cleanup(_ item: HistoryItemDecorator) {
     item.cleanupImages()
+    Notifier.removeDelivered(for: item.item)
   }
 
   @MainActor
@@ -533,7 +538,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     pasteStack = stack
 
     logger.info("Initialising PasteStack with \(stack.items.count) items")
-    logger.info("Copying the first item from PasteStack")
+    logger.info("Copying item 1 of \(stack.items.count) from PasteStack")
 
     if modifierFlags.isEmpty {
       AppState.shared.popup.close()
@@ -581,7 +586,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       return
     }
 
-    logger.info("Copying the next item from PasteStack. \(stack.items.count) items remaining in stack.")
+    logger.info("Copying next item from PasteStack. \(stack.items.count) items remaining in stack.")
 
     Task {
       if stack.modifierFlags.isEmpty {

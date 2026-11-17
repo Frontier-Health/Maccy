@@ -927,7 +927,7 @@ extension SharedStateTests {
       #expect(!Select.value(of: decorator).contains("SECRET"))
       #expect(!item.previewableText.contains("SECRET"))
       #expect(!decorator.text.contains("SECRET"))
-      #expect(!Notifier.body(for: item).contains("SECRET"))
+      #expect(!Notifier.makeContent(alertEnabled: true).body.contains("SECRET"))
       #expect(!AppState.shared.menuIconText.contains("SECRET"))
       #expect(Get.contents(of: item, readableBy: StoragePolicy.current.readAllowList).text == nil)
     }
@@ -937,7 +937,7 @@ extension SharedStateTests {
       let item = storedItem([.string: Data("SECRET-TEXT".utf8)])
       turn(.text, on: false)
       #expect(item.displayTitle == HistoryItem.hiddenTitle)
-      #expect(!Notifier.body(for: item).contains("SECRET"))
+      #expect(!Notifier.makeContent(alertEnabled: true).body.contains("SECRET"))
     }
 
     // MARK: Confirmation (3)
